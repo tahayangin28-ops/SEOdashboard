@@ -14,6 +14,7 @@ from ..database import get_db
 from ..models import AuditCase, Page, PageMetadataChange, PageMetadataObservation, PageMetadataRecommendation, PageRelationship, Project, SitemapEntry
 from ..schemas import OnPageBulkReviewUpdate, OnPageIssueUpdate, OnPageRecommendationUpdate, OnPageThresholdUpdate
 from ..services.on_page import DEFAULT_THRESHOLDS, latest_metadata, on_page_issues, recommendation_for, save_recommendation, serialize_recommendation, thresholds
+from ..services.page_signals import page_signals
 from ..services.activity import add_activity
 
 router = APIRouter(prefix="/api/projects/{project_id}/on-page", tags=["on-page-seo"])
@@ -51,6 +52,7 @@ def _page_item(page: Page, snapshot: dict | None, recommendation: PageMetadataRe
     current = snapshot["current"] if snapshot else {}
     states = snapshot["field_states"] if snapshot else {field: "not_provided" for field in ("h1", "title", "meta_description", "canonical_url", "meta_robots", "hreflang")}
     open_issues = [issue for issue in issues if issue["status"] == "open"]
+    effective = page_signals(page, snapshot, sitemap_count, page.project.preferences)
     return {
         "id": page.id,
         "url": page.original_url,
@@ -69,7 +71,10 @@ def _page_item(page: Page, snapshot: dict | None, recommendation: PageMetadataRe
         # warning behind unrelated higher-priority page issues.
         "notable_issues": open_issues,
         "http_status": page.http_status,
+        "content_type": effective["content_type"],
         "indexability": page.indexability,
+        "canonical_status": effective["canonical_status"],
+        "redirected": effective["redirected"],
         "sitemap_included": page.sitemap_included,
         "imported_sitemap_occurrences": sitemap_count,
         "architecture_parent": {"id": parent.id, "url": parent.original_url} if parent else None,
@@ -99,7 +104,7 @@ def summary(project_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/pages")
-def pages(project_id: str, search: str | None = None, page_type: str | None = None, page_types: list[str] | None = Query(None), issue_type: str | None = None, issue_types: list[str] | None = Query(None), review_status: str | None = None, review_statuses: list[str] | None = Query(None), metadata_only: bool = False, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=250), db: Session = Depends(get_db)):
+def pages(project_id: str, search: str | None = None, page_type: str | None = None, page_types: list[str] | None = Query(None), issue_type: str | None = None, issue_types: list[str] | None = Query(None), review_status: str | None = None, review_statuses: list[str] | None = Query(None), content_types: list[str] | None = Query(None), indexabilities: list[str] | None = Query(None), canonical_statuses: list[str] | None = Query(None), status_codes: list[str] | None = Query(None), redirect_statuses: list[str] | None = Query(None), sitemap_states: list[str] | None = Query(None), metadata_only: bool = False, page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=250), db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
     snapshots, _, issues_by_page, recommendations, sitemap_counts, parents = _context(db, project)
     statement = select(Page).where(Page.project_id == project.id)
@@ -110,6 +115,23 @@ def pages(project_id: str, search: str | None = None, page_type: str | None = No
     elif page_type and page_type != "All":
         statement = statement.where(Page.page_type == page_type)
     candidates = list(db.scalars(statement.order_by(Page.normalized_url)))
+    def include_by_page_signals(item: Page) -> bool:
+        signals = page_signals(item, snapshots.get(item.id), sitemap_counts.get(item.id, 0), project.preferences)
+        if content_types and str(signals["content_type"] or "") not in content_types:
+            return False
+        if indexabilities and str(signals["indexability"] or "Unknown") not in indexabilities:
+            return False
+        if canonical_statuses and signals["canonical_status"] not in canonical_statuses:
+            return False
+        if status_codes and str(signals["http_status"]) not in status_codes:
+            return False
+        if redirect_statuses and ("redirected" if signals["redirected"] else "not_redirected") not in redirect_statuses:
+            return False
+        sitemap_state = "imported" if signals["in_imported_sitemap"] else "proposed" if signals["sitemap_included"] is True else "not_listed"
+        if sitemap_states and sitemap_state not in sitemap_states:
+            return False
+        return True
+    candidates = [item for item in candidates if include_by_page_signals(item)]
     if metadata_only:
         candidates = [item for item in candidates if item.id in snapshots]
     selected_issue_types = issue_types or ([issue_type] if issue_type and issue_type != "All" else [])
@@ -158,11 +180,13 @@ def bulk_review(project_id: str, payload: OnPageBulkReviewUpdate, db: Session = 
 
 
 @router.get("/issues")
-def issues(project_id: str, severity: str | None = None, issue_type: str | None = None, status: str | None = "open", db: Session = Depends(get_db)):
+def issues(project_id: str, severity: str | None = None, priority: str | None = None, issue_type: str | None = None, status: str | None = "open", db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
     rows = on_page_issues(db, project)
     if severity and severity != "All":
         rows = [item for item in rows if item["severity"] == severity.lower()]
+    if priority and priority != "All":
+        rows = [item for item in rows if item["priority"] == priority.lower()]
     if issue_type and issue_type != "All":
         rows = [item for item in rows if item["type"] == issue_type]
     if status and status != "All":

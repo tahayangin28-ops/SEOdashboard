@@ -114,6 +114,8 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
                 "sitemap_included": page.sitemap_included,
                 "architecture_section": page.architecture_section,
                 "architecture_notes": page.architecture_notes,
+                "crawl_data": page.crawl_data,
+                "manual_overrides": page.manual_overrides,
                 "source": page.source,
                 "last_observed_at": _iso(page.last_observed_at),
                 "created_at": _iso(page.created_at),
@@ -217,8 +219,8 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
             for item in metadata_changes
         ],
         "on_page_audit_cases": [
-            {"source_id": item.id, "page_source_id": item.page_id, "issue_key": item.issue_key, "case_type": item.case_type, "status": item.status, "reason": item.reason, "updated_at": _iso(item.updated_at), "evidence": item.evidence}
-            for item in audit_cases if item.case_type == "on_page_issue"
+            {"source_id": item.id, "page_source_id": item.page_id, "issue_key": item.issue_key, "case_type": item.case_type, "status": item.status, "reason": item.reason, "priority_override": item.priority_override, "updated_at": _iso(item.updated_at), "evidence": item.evidence}
+            for item in audit_cases
         ],
         "issue_solutions": [
             {"source_id": item.id, "page_source_id": item.page_id, "issue_key": item.issue_key, "issue_source": item.issue_source, "issue_type": item.issue_type, "issue_label": item.issue_label, "workflow_status": item.workflow_status, "action": item.action, "summary": item.summary, "owner": item.owner, "target_date": _iso(item.target_date), "verification_notes": item.verification_notes, "issue_snapshot": item.issue_snapshot, "solution_data": item.solution_data, "created_at": _iso(item.created_at)}
@@ -304,6 +306,8 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
                 sitemap_included=item.get("sitemap_included"),
                 architecture_section=item.get("architecture_section"),
                 architecture_notes=item.get("architecture_notes"),
+                crawl_data=item.get("crawl_data") or {},
+                manual_overrides=item.get("manual_overrides") or {},
                 source=str(item.get("source") or "project_bundle"),
                 last_observed_at=_datetime(item.get("last_observed_at")) or datetime.now().astimezone(),
             )
@@ -450,7 +454,7 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
             issue_key = str(item.get("issue_key") or "")
             if old_page_id and page_id:
                 issue_key = issue_key.replace(f":{old_page_id}", f":{page_id}", 1)
-            db.add(AuditCase(project_id=project.id, page_id=page_id, issue_key=issue_key or None, case_type="on_page_issue", status=str(item.get("status") or "open"), reason=item.get("reason"), updated_at=_datetime(item.get("updated_at")) or datetime.now().astimezone(), evidence=item.get("evidence") or {}))
+            db.add(AuditCase(project_id=project.id, page_id=page_id, issue_key=issue_key or None, case_type=str(item.get("case_type") or "on_page_issue"), status=str(item.get("status") or "open"), reason=item.get("reason"), priority_override=item.get("priority_override"), updated_at=_datetime(item.get("updated_at")) or datetime.now().astimezone(), evidence=item.get("evidence") or {}))
         solution_ids: dict[str, str] = {}
         for item in bundle.get("issue_solutions", []):
             old_page_id = str(item.get("page_source_id")) if item.get("page_source_id") else None

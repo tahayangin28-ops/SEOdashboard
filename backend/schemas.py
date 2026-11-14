@@ -49,12 +49,16 @@ class PageOut(ORMModel):
     sitemap_included: bool | None
     architecture_section: str | None
     architecture_notes: str | None
+    crawl_data: dict[str, Any] = Field(default_factory=dict)
+    manual_overrides: dict[str, Any] = Field(default_factory=dict)
     source: str
     last_observed_at: datetime
     created_at: datetime
     updated_at: datetime
     imported_sitemap_occurrences: int = 0
     in_imported_sitemap: bool = False
+    effective: dict[str, Any] = Field(default_factory=dict)
+    available_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class ManualPageCreate(BaseModel):
@@ -65,6 +69,19 @@ class ManualPageCreate(BaseModel):
 class BulkTypeUpdate(BaseModel):
     page_ids: list[str]
     page_type: str
+
+
+class PageManualOverrideUpdate(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+    note: str | None = Field(default=None, max_length=2_000)
+
+
+class IssuePriorityUpdate(BaseModel):
+    priority: str | None = None
+
+
+class IssueTypePriorityUpdate(BaseModel):
+    priority: str | None = None
 
 
 class BulkSitemapUpdate(BaseModel):

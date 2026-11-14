@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from ..models import AuditCase, Page, PageMetadataChange, PageMetadataObservation, PageMetadataRecommendation, PageRelationship, Project, SitemapEntry
 from .urls import normalize_url
+from .page_signals import computed_priority, page_signals
+from .issue_priorities import resolve_priority
 
 DEFAULT_THRESHOLDS = {"title_min": 30, "title_max": 60, "description_min": 70, "description_max": 160}
 SEVERITY_ORDER = {"high": 0, "review": 1, "info": 2}
@@ -92,7 +94,8 @@ def on_page_issues(db: Session, project: Project, snapshots: dict[str, dict] | N
     pages = list(db.scalars(select(Page).where(Page.project_id == project.id)))
     pages_by_id = {page.id: page for page in pages}
     pages_by_url = {page.normalized_url: page for page in pages}
-    imported_sitemap_ids = set(db.scalars(select(SitemapEntry.page_id).where(SitemapEntry.project_id == project.id, SitemapEntry.page_id.is_not(None))))
+    imported_sitemap_counts = Counter(db.scalars(select(SitemapEntry.page_id).where(SitemapEntry.project_id == project.id, SitemapEntry.page_id.is_not(None))))
+    imported_sitemap_ids = set(imported_sitemap_counts)
     rules = thresholds(project)
     issues: list[dict] = []
     titles: dict[str, list[Page]] = defaultdict(list)
@@ -103,8 +106,8 @@ def on_page_issues(db: Session, project: Project, snapshots: dict[str, dict] | N
         if not snapshot:
             continue
         current = snapshot["current"]
-        observed_content_type = str(current.get("content_type") or page.content_type or "").casefold()
-        if page.page_type == "Asset" or (observed_content_type and "html" not in observed_content_type):
+        signals = page_signals(page, snapshot, imported_sitemap_counts.get(page.id, 0), project.preferences)
+        if page.page_type == "Asset" or not signals["on_page_eligible"]:
             continue
         if "h1" in current:
             h1s = current.get("h1") or []
@@ -210,9 +213,14 @@ def on_page_issues(db: Session, project: Project, snapshots: dict[str, dict] | N
     cases = {case.issue_key: case for case in db.scalars(select(AuditCase).where(AuditCase.project_id == project.id, AuditCase.case_type == "on_page_issue", AuditCase.issue_key.is_not(None)))}
     for issue in issues:
         case = cases.get(issue["issue_key"])
+        page = pages_by_id[issue["page_id"]]
+        signals = page_signals(page, snapshots.get(page.id), imported_sitemap_counts.get(page.id, 0), project.preferences)
+        issue["priority"] = resolve_priority(project.preferences, "on_page", issue["type"], computed_priority(page, issue["severity"], signals))
         if case:
             issue["status"] = case.status
             issue["reason"] = case.reason
+            if case.priority_override:
+                issue["priority"] = case.priority_override
     return sorted(issues, key=lambda item: (SEVERITY_ORDER[item["severity"]], item["type"], item["url"]))
 
 

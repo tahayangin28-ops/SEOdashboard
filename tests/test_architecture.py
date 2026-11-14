@@ -61,6 +61,77 @@ def test_local_nested_sitemap_bundle_preserves_duplicates_and_matches_inventory(
     assert any("lastmod" in issue["detail"] for issue in issues)
 
 
+def test_technical_issue_rules_priority_override_and_sitemap_removal(client, project):
+    canonical = add_page(client, project["id"], "/preferred", "PLP")
+    page = add_page(client, project["id"], "/legacy", "PDP")
+    assert client.patch(
+        f"/api/projects/{project['id']}/pages/{canonical['id']}/manual-overrides",
+        json={"values": {"http_status": 200, "indexability": "Indexable", "content_type": "text/html", "canonical_url": canonical["original_url"]}},
+    ).status_code == 200
+    assert client.patch(
+        f"/api/projects/{project['id']}/pages/{page['id']}/manual-overrides",
+        json={"values": {"http_status": 302, "indexability": "Indexable", "content_type": "text/html", "canonical_url": canonical["original_url"], "redirect_uri": canonical["original_url"]}},
+    ).status_code == 200
+
+    sitemap = f'<urlset xmlns="{NS}"><url><loc>{page["original_url"]}</loc></url></urlset>'.encode()
+    imported = client.post(
+        f"/api/projects/{project['id']}/architecture/sitemaps/import",
+        files=[("files", ("legacy.xml", sitemap, "application/xml"))],
+    )
+    assert imported.status_code == 201, imported.text
+    issues = client.get(f"/api/projects/{project['id']}/architecture/issues").json()
+    issue_types = {item["type"] for item in issues if item.get("page_id") == page["id"]}
+    assert {"redirect_302", "indexable_non_canonical", "sitemap_non_canonical"} <= issue_types
+    sitemap_issue = next(item for item in client.get(f"/api/projects/{project['id']}/issues").json() if item["type"] == "sitemap_non_canonical")
+    assert sitemap_issue["priority"] == "high"
+    changed = client.patch(
+        f"/api/projects/{project['id']}/issues/{sitemap_issue['issue_key']}/priority",
+        json={"priority": "low"},
+    )
+    assert changed.status_code == 200, changed.text
+    refreshed = next(item for item in client.get(f"/api/projects/{project['id']}/issues").json() if item["issue_key"] == sitemap_issue["issue_key"])
+    assert refreshed["priority"] == "low"
+
+    documents = client.get(f"/api/projects/{project['id']}/architecture/sitemaps").json()
+    removed = client.delete(f"/api/projects/{project['id']}/architecture/sitemaps/{documents[0]['id']}")
+    assert removed.status_code == 200
+    assert removed.json()["entries_removed"] == 1
+    assert client.get(f"/api/projects/{project['id']}/architecture/sitemaps").json() == []
+    assert client.get(f"/api/projects/{project['id']}/pages/{page['id']}").status_code == 200
+
+
+def test_issue_priority_catalog_defaults_and_page_override_precedence(client, project):
+    page = add_page(client, project["id"], "/priority-review", "Unknown")
+    settings_url = f"/api/projects/{project['id']}/issues/priority-settings"
+    settings = client.get(settings_url)
+    assert settings.status_code == 200, settings.text
+    rows = settings.json()
+    assert {row["source"] for row in rows} == {"site_architecture", "on_page"}
+    assert next(row for row in rows if row["source"] == "site_architecture" and row["type"] == "http_5xx")["priority"] == "critical"
+
+    changed = client.patch(f"{settings_url}/site_architecture/unknown_page_type", json={"priority": "critical"})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["customized"] is True
+    issue = next(item for item in client.get(f"/api/projects/{project['id']}/architecture/issues").json() if item["type"] == "unknown_page_type" and item["page_id"] == page["id"])
+    assert issue["priority"] == "critical"
+    central = next(item for item in client.get(f"/api/projects/{project['id']}/issues").json() if item["issue_key"] == issue["issue_key"])
+    assert central["priority"] == "critical"
+
+    override = client.patch(f"/api/projects/{project['id']}/issues/{issue['issue_key']}/priority", json={"priority": "low"})
+    assert override.status_code == 200, override.text
+    assert client.patch(f"{settings_url}/site_architecture/unknown_page_type", json={"priority": "high"}).status_code == 200
+    issue_after_default_change = next(item for item in client.get(f"/api/projects/{project['id']}/architecture/issues").json() if item["issue_key"] == issue["issue_key"])
+    assert issue_after_default_change["priority"] == "low"
+
+    reset = client.delete(settings_url)
+    assert reset.status_code == 200, reset.text
+    restored = next(row for row in client.get(settings_url).json() if row["source"] == "site_architecture" and row["type"] == "unknown_page_type")
+    assert restored["priority"] == "medium"
+    assert restored["customized"] is False
+    preserved_override = next(item for item in client.get(f"/api/projects/{project['id']}/architecture/issues").json() if item["issue_key"] == issue["issue_key"])
+    assert preserved_override["priority"] == "low"
+
+
 def test_malformed_xml_is_rejected(client, project):
     response = client.post(
         f"/api/projects/{project['id']}/architecture/sitemaps/import",
@@ -355,7 +426,7 @@ def test_hierarchy_svg_single_and_multi_map_exports_and_categorized_issue_csv(cl
     rows = list(csv.DictReader(io.StringIO(exported.text)))
     assert rows
     assert set(rows[0]) == {
-        "Category", "Severity", "Issue Type", "Label", "URL", "Detail",
+        "Category", "Severity", "Priority", "Issue Type", "Label", "URL", "Detail",
         "Page Type", "Content Type", "Status Code", "Status", "Indexability",
         "Indexability Status", "Proposed Sitemap", "Imported Sitemap Occurrences",
         "Architecture Section", "Path Depth", "Hierarchy Depth", "Approved Parent URL",

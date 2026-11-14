@@ -8,6 +8,7 @@ __pycache__/
 *.tsbuildinfo
 data/*.db
 data/*.db-*
+data/backups/
 backups/*.db
 build/offline-release/
 release-assets/

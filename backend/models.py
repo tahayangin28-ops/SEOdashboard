@@ -62,6 +62,11 @@ class Page(Base):
     sitemap_included: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     architecture_section: Mapped[str | None] = mapped_column(String(255))
     architecture_notes: Mapped[str | None] = mapped_column(Text)
+    # The latest imported row is retained separately from curated user values.
+    # This lets the workspace expose every crawl column without allowing a
+    # manual correction to overwrite source evidence.
+    crawl_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    manual_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(80), default="manual")
     last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -436,6 +441,7 @@ class AuditCase(Base):
     case_type: Mapped[str] = mapped_column(String(80))
     status: Mapped[str] = mapped_column(String(40), default="open")
     reason: Mapped[str | None] = mapped_column(Text)
+    priority_override: Mapped[str | None] = mapped_column(String(40))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
 

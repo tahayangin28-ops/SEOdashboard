@@ -193,6 +193,52 @@ def test_reimport_preserves_page_type_and_logs_only_supplied_crawl_changes(clien
     assert len(restored_history) == 2
 
 
+def test_latest_crawl_columns_manual_overrides_and_advanced_page_filters(client, project):
+    first = b"Address,Status Code,Status,Indexability,Indexability Status,Content Type,Canonical Link Element 1,Redirect URI,Redirect Type,Word Count\nhttps://shop.example.com/item,200,OK,Indexable,,text/html,https://shop.example.com/item,,,420\n"
+    staged = client.post(
+        f"/api/projects/{project['id']}/imports/stage",
+        data={"source": "screaming_frog"},
+        files={"file": ("crawl-full.csv", first, "text/csv")},
+    ).json()
+    confirmed = client.post(
+        f"/api/projects/{project['id']}/imports/{staged['batch']['id']}/confirm",
+        json={"mapping": staged["suggested_mapping"]},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    page = client.get(f"/api/projects/{project['id']}/pages?page_size=100").json()["items"][0]
+    assert page["available_metrics"]["Word Count"] == "420"
+    assert page["effective"]["canonical_status"] == "canonical"
+
+    edited = client.patch(
+        f"/api/projects/{project['id']}/pages/{page['id']}/manual-overrides",
+        json={"values": {"indexability": "Non-Indexable", "canonical_url": "https://shop.example.com/preferred"}, "note": "Stakeholder decision"},
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["effective"]["indexability"] == "Non-Indexable"
+    assert edited.json()["effective"]["canonical_status"] == "non_canonical"
+    filtered = client.get(
+        f"/api/projects/{project['id']}/pages",
+        params=[("url_operator", "ends_with"), ("url_value", "/item"), ("indexabilities", "Non-Indexable"), ("canonical_statuses", "non_canonical")],
+    ).json()
+    assert filtered["total"] == 1
+
+    second = b"Address,Status Code,Status,Indexability,Content Type,Canonical Link Element 1,Word Count\nhttps://shop.example.com/item,301,Moved Permanently,Indexable,text/html,https://shop.example.com/item,500\n"
+    staged_again = client.post(
+        f"/api/projects/{project['id']}/imports/stage",
+        data={"source": "screaming_frog"},
+        files={"file": ("crawl-new.csv", second, "text/csv")},
+    ).json()
+    client.post(
+        f"/api/projects/{project['id']}/imports/{staged_again['batch']['id']}/confirm",
+        json={"mapping": staged_again["suggested_mapping"]},
+    )
+    refreshed = client.get(f"/api/projects/{project['id']}/pages/{page['id']}").json()
+    assert refreshed["http_status"] == 301
+    assert refreshed["effective"]["indexability"] == "Non-Indexable"
+    assert refreshed["manual_overrides"]["_note"] == "Stakeholder decision"
+    assert refreshed["available_metrics"]["Word Count"] == "500"
+
+
 def test_duplicate_manual_identity_is_not_silently_merged(client, project):
     payload = {"url": "https://shop.example.com/shoes/?utm_source=email", "page_type": "PLP"}
     assert client.post(f"/api/projects/{project['id']}/pages", json=payload).status_code == 201

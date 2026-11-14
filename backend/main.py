@@ -20,8 +20,8 @@ from .database import DATABASE_URL, get_db
 from .migrations import run_startup_migrations
 from .paths import BACKUP_DIR, STATIC_DIR, is_packaged
 from .runtime_control import request_shutdown, runtime_enabled
-from .models import CannibalizationCase, GA4PagePerformance, GSCQueryPagePerformance, ImportBatch, ImportRow, IssueSolution, KeywordGroup, KeywordGroupMembership, Page, PageCrawlChange, PageMetadataRecommendation, PageType, Project, RankingObservation, SitemapEntry, TargetMapping
-from .schemas import BulkTypeUpdate, ConfirmImport, ImportOut, IssueSolutionCreate, ManualPageCreate, PageOut, ProjectCreate, ProjectOut, ProjectUpdate
+from .models import AuditCase, CannibalizationCase, GA4PagePerformance, GSCQueryPagePerformance, ImportBatch, ImportRow, IssueSolution, KeywordGroup, KeywordGroupMembership, Page, PageCrawlChange, PageMetadataRecommendation, PageType, Project, RankingObservation, SitemapEntry, TargetMapping
+from .schemas import BulkTypeUpdate, ConfirmImport, ImportOut, IssuePriorityUpdate, IssueSolutionCreate, IssueTypePriorityUpdate, ManualPageCreate, PageManualOverrideUpdate, PageOut, ProjectCreate, ProjectOut, ProjectUpdate
 from .services.imports import confirm_import, stage_upload
 from .services.project_bundles import delete_project_records, export_project_bundle, import_project_bundle
 from .services.urls import normalize_url
@@ -33,6 +33,8 @@ from .routes.activity import router as activity_router
 from .services.activity import add_activity
 from .services.on_page import latest_metadata, on_page_issues
 from .services.architecture import architecture_issues
+from .services.page_signals import EDITABLE_FIELDS, matches_url, page_signals
+from .services.issue_priorities import ISSUE_TYPE_DEFINITIONS, PRIORITY_LEVELS, preference_key, priority_catalog
 from .services.keywords import confirm_keyword_import, current_keyword_rows
 
 
@@ -117,7 +119,7 @@ def serialize_issue_solution(item: IssueSolution) -> dict:
 def unified_issue_rows(db: Session, project: Project, status: str = "open") -> list[dict]:
     rows = []
     for issue in architecture_issues(db, project):
-        rows.append({**issue, "source": "site_architecture", "source_label": "Site Architecture", "source_severity": issue["severity"], "status": "open", "issue_key": f"architecture:{issue['type']}:{issue.get('page_id') or issue.get('url') or 'project'}"})
+        rows.append({**issue, "source": "site_architecture", "source_label": "Site Architecture", "source_severity": issue["severity"], "status": "open"})
     severity_map = {"high": "error", "review": "warning", "info": "info"}
     for issue in on_page_issues(db, project):
         if status != "All" and issue["status"] != status:
@@ -146,8 +148,72 @@ def all_project_issues_csv(project_id: str, status: str = "open", db: Session = 
     writer.writeheader()
     for issue in unified_issue_rows(db, project_or_404(db, project_id), status):
         latest = issue.get("latest_solution") or {}
-        writer.writerow({"Source": issue["source_label"], "Category": issue["category"], "Priority": issue["severity"], "Source Severity": issue["source_severity"], "Status": issue["status"], "Issue Type": issue["type"], "Label": issue["label"], "URL": issue.get("url") or "", "Detail": issue["detail"], "Solution Entries": issue["solution_count"], "Latest Solution Stage": latest.get("workflow_status", ""), "Latest Solution Action": latest.get("action", ""), "Latest Solution Summary": latest.get("summary", ""), "Latest Solution Owner": latest.get("owner", ""), "Latest Solution Date": latest.get("created_at", "")})
+        writer.writerow({"Source": issue["source_label"], "Category": issue["category"], "Priority": issue["priority"], "Source Severity": issue["source_severity"], "Status": issue["status"], "Issue Type": issue["type"], "Label": issue["label"], "URL": issue.get("url") or "", "Detail": issue["detail"], "Solution Entries": issue["solution_count"], "Latest Solution Stage": latest.get("workflow_status", ""), "Latest Solution Action": latest.get("action", ""), "Latest Solution Summary": latest.get("summary", ""), "Latest Solution Owner": latest.get("owner", ""), "Latest Solution Date": latest.get("created_at", "")})
     return Response(output.getvalue(), media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="all-issues.csv"'})
+
+
+@app.get("/api/projects/{project_id}/issues/priority-settings")
+def issue_priority_settings(project_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    counts: dict[tuple[str, str], int] = {}
+    for issue in unified_issue_rows(db, project, "All"):
+        key = (issue["source"], issue["type"])
+        counts[key] = counts.get(key, 0) + 1
+    return [{**row, "detected_count": counts.get((row["source"], row["type"]), 0)} for row in priority_catalog(project.preferences)]
+
+
+@app.patch("/api/projects/{project_id}/issues/priority-settings/{source}/{issue_type}")
+def update_issue_type_priority(project_id: str, source: str, issue_type: str, payload: IssueTypePriorityUpdate, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    definition = next((item for item in ISSUE_TYPE_DEFINITIONS if item["source"] == source and item["type"] == issue_type), None)
+    if not definition:
+        raise HTTPException(404, "Issue type not found")
+    if payload.priority is not None and payload.priority not in PRIORITY_LEVELS:
+        raise HTTPException(422, "Priority must be critical, high, medium, low, or default")
+    preferences = dict(project.preferences or {})
+    configured = dict(preferences.get("issue_priority_defaults") or {})
+    key = preference_key(source, issue_type)
+    before = configured.get(key) or definition["default_priority"]
+    if payload.priority is None:
+        configured.pop(key, None)
+    else:
+        configured[key] = payload.priority
+    preferences["issue_priority_defaults"] = configured
+    project.preferences = preferences
+    add_activity(db, project.id, source="issue_review", section=source, action_type="issue_default_priority_changed", status="changed", title=f"Default priority changed: {definition['label']}", issue_type=issue_type, before_data={"priority": before}, after_data={"priority": payload.priority or definition["default_priority"]})
+    db.commit()
+    return {**definition, "priority": payload.priority or definition["default_priority"], "customized": payload.priority is not None}
+
+
+@app.delete("/api/projects/{project_id}/issues/priority-settings")
+def reset_issue_type_priorities(project_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    preferences = dict(project.preferences or {})
+    previous = dict(preferences.get("issue_priority_defaults") or {})
+    preferences["issue_priority_defaults"] = {}
+    project.preferences = preferences
+    add_activity(db, project.id, source="issue_review", section="all", action_type="issue_default_priorities_reset", status="changed", title="Issue priorities restored to defaults", before_data={"issue_priority_defaults": previous}, after_data={"issue_priority_defaults": {}})
+    db.commit()
+    return {"reset": len(previous)}
+
+
+@app.patch("/api/projects/{project_id}/issues/{issue_key}/priority")
+def update_issue_priority(project_id: str, issue_key: str, payload: IssuePriorityUpdate, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    if payload.priority not in {None, *PRIORITY_LEVELS}:
+        raise HTTPException(422, "Priority must be critical, high, medium, low, or automatic")
+    issue = next((item for item in unified_issue_rows(db, project, "All") if item["issue_key"] == issue_key), None)
+    if not issue:
+        raise HTTPException(404, "Issue not found")
+    case = db.scalar(select(AuditCase).where(AuditCase.project_id == project.id, AuditCase.issue_key == issue_key))
+    if not case:
+        case = AuditCase(project_id=project.id, page_id=issue.get("page_id"), issue_key=issue_key, case_type="on_page_issue" if issue["source"] == "on_page" else "issue_priority", status=issue.get("status", "open"))
+        db.add(case)
+    before = case.priority_override
+    case.priority_override = payload.priority
+    add_activity(db, project.id, source="issue_review", section=issue["source"], action_type="issue_priority_changed", status="changed", title=f"Priority changed: {issue['label']}", page_id=issue.get("page_id"), url=issue.get("url"), issue_key=issue_key, issue_type=issue["type"], before_data={"priority": before}, after_data={"priority": payload.priority or "automatic"})
+    db.commit()
+    return {"issue_key": issue_key, "priority": payload.priority or "automatic"}
 
 
 @app.get("/api/projects/{project_id}/issue-solutions")
@@ -195,7 +261,7 @@ def create_issue_solution(project_id: str, payload: IssueSolutionCreate, db: Ses
         "sitemap_included": page.sitemap_included,
         "architecture_section": page.architecture_section,
     }
-    snapshot = {key: issue.get(key) for key in ("source", "source_label", "type", "category", "severity", "source_severity", "status", "url", "label", "detail")}
+    snapshot = {key: issue.get(key) for key in ("source", "source_label", "type", "category", "severity", "priority", "source_severity", "status", "url", "label", "detail")}
     snapshot["page_metrics"] = page_metrics
     if payload.source == "on_page" and page:
         metadata_snapshot = latest_metadata(db, project.id).get(page.id)
@@ -448,26 +514,58 @@ def list_pages(
     source: str | None = None,
     classification: str | None = None,
     page_types: list[str] | None = Query(None),
+    url_operator: str | None = None,
+    url_value: str | None = None,
+    content_types: list[str] | None = Query(None),
+    indexabilities: list[str] | None = Query(None),
+    canonical_statuses: list[str] | None = Query(None),
+    status_codes: list[str] | None = Query(None),
+    redirect_statuses: list[str] | None = Query(None),
+    sitemap_states: list[str] | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=250),
     sort: str = "last_observed_at",
     direction: str = "desc",
     db: Session = Depends(get_db),
 ):
-    project_or_404(db, project_id)
+    project = project_or_404(db, project_id)
     base = page_statement(project_id, search, page_type, indexability, status, source, classification, page_types)
-    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
     allowed_sort = {"original_url", "page_type", "http_status", "indexability", "source", "last_observed_at"}
     sort_column = getattr(Page, sort if sort in allowed_sort else "last_observed_at")
-    ordered = base.order_by(sort_column.asc() if direction == "asc" else sort_column.desc()).offset((page - 1) * page_size).limit(page_size)
-    items = db.scalars(ordered).all()
-    item_ids = [item.id for item in items]
-    sitemap_counts = dict(db.execute(select(SitemapEntry.page_id, func.count(SitemapEntry.id)).where(SitemapEntry.project_id == project_id, SitemapEntry.page_id.in_(item_ids)).group_by(SitemapEntry.page_id)).all()) if item_ids else {}
+    candidates = list(db.scalars(base.order_by(sort_column.asc() if direction == "asc" else sort_column.desc())))
+    candidate_ids = [item.id for item in candidates]
+    sitemap_counts = dict(db.execute(select(SitemapEntry.page_id, func.count(SitemapEntry.id)).where(SitemapEntry.project_id == project_id, SitemapEntry.page_id.in_(candidate_ids)).group_by(SitemapEntry.page_id)).all()) if candidate_ids else {}
+    snapshots = latest_metadata(db, project.id)
+    enriched = [(item, page_signals(item, snapshots.get(item.id), sitemap_counts.get(item.id, 0), project.preferences)) for item in candidates]
+    if url_value:
+        enriched = [(item, signals) for item, signals in enriched if matches_url(item.original_url, url_operator, url_value)]
+    if content_types:
+        enriched = [(item, signals) for item, signals in enriched if str(signals["content_type"] or "") in content_types]
+    if indexabilities:
+        enriched = [(item, signals) for item, signals in enriched if str(signals["indexability"] or "Unknown") in indexabilities]
+    if canonical_statuses:
+        enriched = [(item, signals) for item, signals in enriched if signals["canonical_status"] in canonical_statuses]
+    if status_codes:
+        enriched = [(item, signals) for item, signals in enriched if str(signals["http_status"]) in status_codes]
+    if redirect_statuses:
+        enriched = [(item, signals) for item, signals in enriched if ("redirected" if signals["redirected"] else "not_redirected") in redirect_statuses]
+    if sitemap_states:
+        def sitemap_state(signals):
+            if signals["in_imported_sitemap"]:
+                return "imported"
+            if signals["sitemap_included"] is True:
+                return "proposed"
+            return "not_listed"
+        enriched = [(item, signals) for item, signals in enriched if sitemap_state(signals) in sitemap_states]
+    total = len(enriched)
+    enriched = enriched[(page - 1) * page_size:page * page_size]
     payload = []
-    for item in items:
+    for item, signals in enriched:
         serialized = PageOut.model_validate(item).model_dump(mode="json")
         serialized["imported_sitemap_occurrences"] = sitemap_counts.get(item.id, 0)
         serialized["in_imported_sitemap"] = bool(sitemap_counts.get(item.id, 0))
+        serialized["effective"] = signals
+        serialized["available_metrics"] = (item.crawl_data or {}).get("raw_columns", {})
         payload.append(serialized)
     return {"items": payload, "total": total, "page": page, "page_size": page_size}
 
@@ -481,7 +579,58 @@ def page_detail(project_id: str, page_id: str, db: Session = Depends(get_db)):
     payload = PageOut.model_validate(page).model_dump()
     payload["imported_sitemap_occurrences"] = sitemap_count
     payload["in_imported_sitemap"] = bool(sitemap_count)
+    snapshot = latest_metadata(db, project_id).get(page.id)
+    payload["effective"] = page_signals(page, snapshot, sitemap_count, page.project.preferences)
+    payload["available_metrics"] = (page.crawl_data or {}).get("raw_columns", {})
     return payload
+
+
+@app.get("/api/projects/{project_id}/page-filter-options")
+def page_filter_options(project_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    pages = list(db.scalars(select(Page).where(Page.project_id == project.id, Page.page_type != PageType.DRAFT.value)))
+    snapshots = latest_metadata(db, project.id)
+    counts = dict(db.execute(select(SitemapEntry.page_id, func.count(SitemapEntry.id)).where(SitemapEntry.project_id == project.id).group_by(SitemapEntry.page_id)).all())
+    signals = [page_signals(page, snapshots.get(page.id), counts.get(page.id, 0), project.preferences) for page in pages]
+    return {
+        "content_types": sorted({str(item["content_type"]) for item in signals if item["content_type"]}),
+        "indexabilities": sorted({str(item["indexability"]) for item in signals if item["indexability"]}),
+        "status_codes": sorted({int(item["http_status"]) for item in signals if item["http_status"] is not None}),
+        "canonical_statuses": ["canonical", "non_canonical", "invalid", "unknown"],
+        "redirect_statuses": ["redirected", "not_redirected"],
+        "sitemap_states": ["imported", "proposed", "not_listed"],
+        "metric_names": sorted({name for page in pages for name in (page.crawl_data or {}).get("raw_columns", {})}),
+    }
+
+
+@app.patch("/api/projects/{project_id}/pages/{page_id}/manual-overrides")
+def update_page_manual_overrides(project_id: str, page_id: str, payload: PageManualOverrideUpdate, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    page = db.get(Page, page_id)
+    if not page or page.project_id != project.id:
+        raise HTTPException(404, "Page not found")
+    unsupported = sorted(set(payload.values).difference(EDITABLE_FIELDS))
+    if unsupported:
+        raise HTTPException(422, f"Unsupported manual fields: {', '.join(unsupported)}")
+    before = dict(page.manual_overrides or {})
+    updated = dict(before)
+    for field, value in payload.values.items():
+        if value is None or value == "":
+            updated.pop(field, None)
+        elif field == "http_status":
+            updated[field] = int(value)
+        else:
+            updated[field] = value
+    if payload.note is not None:
+        if payload.note.strip():
+            updated["_note"] = payload.note.strip()
+        else:
+            updated.pop("_note", None)
+    page.manual_overrides = updated
+    add_activity(db, project.id, source="pages", section="pages", action_type="page_manual_override", status="changed", title="Page attributes manually updated", notes=payload.note, page_id=page.id, url=page.original_url, before_data=before, after_data=updated)
+    db.commit()
+    sitemap_count = db.scalar(select(func.count(SitemapEntry.id)).where(SitemapEntry.project_id == project.id, SitemapEntry.page_id == page.id)) or 0
+    return {"manual_overrides": updated, "effective": page_signals(page, latest_metadata(db, project.id).get(page.id), sitemap_count, project.preferences)}
 
 
 @app.get("/api/projects/{project_id}/pages/{page_id}/changes")

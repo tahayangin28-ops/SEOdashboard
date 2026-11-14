@@ -232,6 +232,14 @@ def confirm_import(db: Session, batch: ImportBatch, project: Project, mapping: d
                 row.page_id = page.id
                 skipped += 1
                 continue
+            page.crawl_data = {
+                "batch_id": batch.id,
+                "file_name": batch.file_name,
+                "imported_at": batch.imported_at.isoformat(),
+                "recognized": recognized_fields,
+                "raw_columns": row.raw_data,
+                "mapping": mapping,
+            }
             crawl_changes = {}
             for field_name, label in CRAWL_PAGE_FIELDS.items():
                 new_value = values[field_name]
@@ -267,6 +275,14 @@ def confirm_import(db: Session, batch: ImportBatch, project: Project, mapping: d
             if page_type == "Unknown" and is_obvious_asset(values["content_type"], normalized):
                 page_type = "Asset"
             page = Page(project_id=project.id, original_url=url, normalized_url=normalized, page_type=page_type, source=batch.source, http_status=values["http_status"], http_status_text=values["http_status_text"], indexability=values["indexability"], indexability_status=values["indexability_status"], content_type=values["content_type"], url_path=values["url_path"])
+            page.crawl_data = {
+                "batch_id": batch.id,
+                "file_name": batch.file_name,
+                "imported_at": batch.imported_at.isoformat(),
+                "recognized": recognized_fields,
+                "raw_columns": row.raw_data,
+                "mapping": mapping,
+            }
             db.add(page)
             db.flush()
             row.validation_status = "imported"

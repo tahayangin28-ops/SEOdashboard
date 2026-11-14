@@ -154,6 +154,20 @@ def sitemap_documents(project_id: str, db: Session = Depends(get_db)):
     return [{"id": item.id, "file_name": item.file_name, "document_type": item.document_type, "imported_at": item.imported_at, "entries": counts.get(item.id, 0), "referenced_files": item.referenced_files, "unresolved_references": item.unresolved_references, "warnings": item.warnings} for item in documents]
 
 
+@router.delete("/sitemaps/{document_id}")
+def delete_sitemap_document(project_id: str, document_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    document = db.get(SitemapDocument, document_id)
+    if not document or document.project_id != project.id:
+        raise HTTPException(404, "Sitemap document not found")
+    entry_count = db.scalar(select(func.count(SitemapEntry.id)).where(SitemapEntry.document_id == document.id)) or 0
+    db.execute(delete(SitemapEntry).where(SitemapEntry.document_id == document.id))
+    db.delete(document)
+    add_activity(db, project.id, source="site_architecture", section="site_architecture", action_type="sitemap_removed", status="changed", title=f"Removed sitemap: {document.file_name}", before_data={"document_id": document.id, "file_name": document.file_name, "entries": entry_count})
+    db.commit()
+    return {"deleted": True, "entries_removed": entry_count}
+
+
 @router.get("/sitemaps/export")
 def export_sitemap(project_id: str, db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
@@ -284,6 +298,7 @@ def issues_csv(
     project_id: str,
     issue_type: str | None = None,
     severities: list[str] = Query(default=[]),
+    priorities: list[str] = Query(default=[]),
     search: str | None = None,
     db: Session = Depends(get_db),
 ):
@@ -293,12 +308,14 @@ def issues_csv(
         rows = [issue for issue in rows if issue["type"] == issue_type]
     if severities:
         rows = [issue for issue in rows if issue["severity"] in severities]
+    if priorities:
+        rows = [issue for issue in rows if issue["priority"] in priorities]
     if search and search.strip():
         term = search.strip().casefold()
         rows = [issue for issue in rows if term in f'{issue["label"]} {issue.get("url") or ""} {issue["detail"]}'.casefold()]
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=[
-        "Category", "Severity", "Issue Type", "Label", "URL", "Detail",
+        "Category", "Severity", "Priority", "Issue Type", "Label", "URL", "Detail",
         "Page Type", "Content Type", "Status Code", "Status", "Indexability",
         "Indexability Status", "Proposed Sitemap", "Imported Sitemap Occurrences",
         "Architecture Section", "Path Depth", "Hierarchy Depth", "Approved Parent URL",
@@ -310,6 +327,7 @@ def issues_csv(
         writer.writerow({
             "Category": issue["category"],
             "Severity": issue["severity"],
+            "Priority": issue["priority"],
             "Issue Type": issue["type"],
             "Label": issue["label"],
             "URL": issue.get("url") or "",
