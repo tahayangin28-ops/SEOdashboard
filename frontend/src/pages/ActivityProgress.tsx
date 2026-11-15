@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { api, postJson } from '../api'
 import { SummaryActionCard } from '../components/SummaryActionCard'
 import type { ActivityCategory, MonthlyComparison, Project, SEOActivity } from '../types'
@@ -81,7 +81,7 @@ function ActivityGroupRow({group,project,onChanged}:{group:ActivityGroup;project
   </article>
 }
 
-function ActivityHistoryEntry({item}:{item:SEOActivity}){const hasData=Object.keys(item.before_data).length>0||Object.keys(item.after_data).length>0,title=cleanActivityTitle(item);return <article className="activity-history-entry"><header><div><b title={title}>{title}</b><small>{fmtDateTime(item.occurred_at)} · {label(item.section)}{item.category?` · ${item.category}`:''}</small></div><em>{label(item.status)}</em></header>{item.notes&&<p>{item.notes}</p>}{item.issue_type&&<dl><div><dt>Issue type</dt><dd>{label(item.issue_type)}</dd></div><div><dt>Action</dt><dd>{label(item.action_type)}</dd></div></dl>}{hasData&&<div className="before-after"><div><strong>Previous value</strong><pre>{JSON.stringify(item.before_data,null,2)}</pre></div><div><strong>New value</strong><pre>{JSON.stringify(item.after_data,null,2)}</pre></div></div>}</article>}
+function ActivityHistoryEntry({item}:{item:SEOActivity}){const hasData=Object.keys(item.before_data).length>0||Object.keys(item.after_data).length>0,title=cleanActivityTitle(item);return <article className="activity-history-entry"><header><div><b title={title}>{title}</b><small>{fmtDateTime(item.occurred_at)} · {label(item.section)}{item.category?` · ${item.category}`:''}</small></div><em>{label(item.status)}</em></header>{item.task_id&&<Link className="activity-task-link" to="/tasks">Open linked task →</Link>}{item.notes&&<p>{item.notes}</p>}{item.issue_type&&<dl><div><dt>Issue type</dt><dd>{label(item.issue_type)}</dd></div><div><dt>Action</dt><dd>{label(item.action_type)}</dd></div></dl>}{hasData&&<div className="before-after"><div><strong>Previous value</strong><pre>{JSON.stringify(item.before_data,null,2)}</pre></div><div><strong>New value</strong><pre>{JSON.stringify(item.after_data,null,2)}</pre></div></div>}</article>}
 
 function groupActivities(items:SEOActivity[]):ActivityGroup[]{
   const grouped=new Map<string,SEOActivity[]>()

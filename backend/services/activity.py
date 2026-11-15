@@ -24,6 +24,8 @@ from ..models import (
     Project,
     RankingObservation,
     SEOActivity,
+    SEOTask,
+    SEOTaskHistory,
 )
 from .architecture import architecture_issues
 from .on_page import latest_metadata, on_page_issues
@@ -140,6 +142,7 @@ def serialize_activity(item: SEOActivity, category_name: str | None = None, rela
         "import_batch_id": item.import_batch_id,
         "recommendation_id": item.recommendation_id,
         "issue_solution_id": item.issue_solution_id,
+        "task_id": item.task_id,
         "related_activity_id": item.related_activity_id,
         "source": item.source,
         "section": section,
@@ -305,6 +308,18 @@ def record_issue_snapshot(db: Session, project: Project, batch: ImportBatch) -> 
             before_data={"present": True, "detail": old.detail, "evidence": old.evidence or {}}, after_data=after,
             occurred_at=observed_at, activity_metadata={"category": old.category, "severity": old.severity, "recommendation_linked": bool(solution)},
         )
+        linked_tasks = list(db.scalars(select(SEOTask).where(SEOTask.project_id == project.id, SEOTask.source_issue_key == key, SEOTask.verified_resolution.is_(False))))
+        for task in linked_tasks:
+            before_task = {"verified_resolution": False, "task_status": task.status}
+            task.verified_resolution = True
+            task.verification_data = {"import_batch_id": batch.id, "file_name": batch.file_name, "verified_at": observed_at.isoformat(), "issue_present": False}
+            db.add(SEOTaskHistory(project_id=project.id, task_id=task.id, event_type="verified_resolved", before_data=before_task, after_data={"verified_resolution": True, **task.verification_data}, notes="The latest crawl no longer detects the linked issue."))
+            add_activity(db, project.id, event_key=f"task-verified:{batch.checksum}:{task.id}", task_id=task.id,
+                source="crawl_comparison", section=old.issue_source, action_type="task_verified_resolved", status="resolved", title=task.title,
+                notes="The linked issue is no longer detected in the latest crawl. Task completion is recorded separately and is not treated as proof of causation.",
+                import_batch_id=batch.id, url=old.url, issue_key=key, issue_type=old.issue_type,
+                before_data=before_task, after_data={"verified_resolution": True, **task.verification_data}, occurred_at=observed_at,
+                activity_metadata={"task_id": task.id, "verification": "crawl_confirmed"})
     db.add(IssueSnapshotRun(project_id=project.id, import_batch_id=batch.id, observed_on=observed_on, observed_at=observed_at, outstanding_count=len(current), new_count=len(new_keys), resolved_count=len(resolved_keys), baseline=False))
     return {"outstanding": len(current), "new": len(new_keys), "resolved": len(resolved_keys), "baseline": 0}
 

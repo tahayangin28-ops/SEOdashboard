@@ -512,6 +512,64 @@ class IssueSnapshotRun(Base):
     baseline: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class RoadmapPeriod(Base):
+    __tablename__ = "roadmap_periods"
+    __table_args__ = (UniqueConstraint("project_id", "year", "position", name="uq_roadmap_period_position"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    year: Mapped[int] = mapped_column(Integer, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    position: Mapped[int] = mapped_column(Integer)
+    start_month: Mapped[int] = mapped_column(Integer)
+    end_month: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class SEOTask(Base):
+    __tablename__ = "seo_tasks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    roadmap_period_id: Mapped[str | None] = mapped_column(ForeignKey("roadmap_periods.id"), index=True)
+    title: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(120), default="General", index=True)
+    priority: Mapped[str] = mapped_column(String(40), default="medium", index=True)
+    status: Mapped[str] = mapped_column(String(40), default="to_do", index=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(160))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    due_date: Mapped[date | None] = mapped_column(Date, index=True)
+    completion_date: Mapped[date | None] = mapped_column(Date)
+    completion_notes: Mapped[str | None] = mapped_column(Text)
+    scheduled_year: Mapped[int | None] = mapped_column(Integer, index=True)
+    scheduled_month: Mapped[int | None] = mapped_column(Integer)
+    scheduled_week: Mapped[date | None] = mapped_column(Date)
+    related_urls: Mapped[list] = mapped_column(JSON, default=list)
+    supporting_links: Mapped[list] = mapped_column(JSON, default=list)
+    notes: Mapped[str | None] = mapped_column(Text)
+    source_issue_key: Mapped[str | None] = mapped_column(String(2048), index=True)
+    source_issue_type: Mapped[str | None] = mapped_column(String(255))
+    source_section: Mapped[str | None] = mapped_column(String(40), index=True)
+    source_url: Mapped[str | None] = mapped_column(String(4096))
+    source_recommendation_id: Mapped[str | None] = mapped_column(ForeignKey("page_metadata_recommendations.id"), index=True)
+    verified_resolution: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    verification_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, onupdate=now)
+
+
+class SEOTaskHistory(Base):
+    __tablename__ = "seo_task_history"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("seo_tasks.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    before_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    after_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
 class SEOActivity(Base):
     """Append-only human and system activity record."""
 
@@ -524,6 +582,7 @@ class SEOActivity(Base):
     import_batch_id: Mapped[str | None] = mapped_column(ForeignKey("import_batches.id"), index=True)
     recommendation_id: Mapped[str | None] = mapped_column(ForeignKey("page_metadata_recommendations.id"), index=True)
     issue_solution_id: Mapped[str | None] = mapped_column(ForeignKey("issue_solutions.id"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("seo_tasks.id"), index=True)
     related_activity_id: Mapped[str | None] = mapped_column(ForeignKey("seo_activities.id"), index=True)
     event_key: Mapped[str] = mapped_column(String(512))
     source: Mapped[str] = mapped_column(String(40), default="manual", index=True)

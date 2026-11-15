@@ -6,7 +6,7 @@ import { Icon } from './Icons'
 export function Layout({projects, activeProject, onProject, onNewProject, children}:{projects:Project[]; activeProject?:Project; onProject:(id:string)=>void; onNewProject:()=>void; children:React.ReactNode}) {
   const beforeKeywords = [['/','Dashboard','grid'],['/projects','Projects','folder'],['/pages','Pages','pages'],['/architecture','Site Architecture','tree'],['/on-page','On-Page SEO','edit']] as const
   const keywordNav = [['/keywords','Keyword Research','search'],['/saved-keywords','Saved Keywords','folder'],['/keyword-groups','Keyword Groups','folder'],['/page-mapping','Page Mapping','pages'],['/cannibalization','Cannibalization','alert']] as const
-  const afterKeywords = [['/activity','SEO Tracker','edit'],['/issues','Issues','alert'],['/imports','Imports','upload'],['/settings','Settings','settings']] as const
+  const afterKeywords = [['/tasks','Task Manager','pages'],['/activity','SEO Tracker','edit'],['/issues','Issues','alert'],['/imports','Imports','upload'],['/settings','Settings','settings']] as const
   const location=useLocation()
   const [collapsed,setCollapsed]=useState(()=>{try{return localStorage.getItem('page-mapper:sidebar-collapsed')==='true'}catch{return false}})
   const [keywordOpen,setKeywordOpen]=useState(()=>{try{return localStorage.getItem('page-mapper:keyword-nav-open')!=='false'}catch{return true}})

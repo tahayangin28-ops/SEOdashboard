@@ -33,7 +33,10 @@ from ..models import (
     Project,
     RankingObservation,
     ReviewHistory,
+    RoadmapPeriod,
     SEOActivity,
+    SEOTask,
+    SEOTaskHistory,
     GroupingSuggestion,
     SitemapDocument,
     SitemapEntry,
@@ -84,6 +87,9 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
     issue_snapshots = db.scalars(select(IssueSnapshot).where(IssueSnapshot.project_id == project.id).order_by(IssueSnapshot.observed_at)).all()
     issue_snapshot_runs = db.scalars(select(IssueSnapshotRun).where(IssueSnapshotRun.project_id == project.id).order_by(IssueSnapshotRun.observed_at)).all()
     seo_activities = db.scalars(select(SEOActivity).where(SEOActivity.project_id == project.id).order_by(SEOActivity.occurred_at)).all()
+    roadmap_periods = db.scalars(select(RoadmapPeriod).where(RoadmapPeriod.project_id == project.id).order_by(RoadmapPeriod.year, RoadmapPeriod.position)).all()
+    seo_tasks = db.scalars(select(SEOTask).where(SEOTask.project_id == project.id).order_by(SEOTask.created_at)).all()
+    seo_task_history = db.scalars(select(SEOTaskHistory).where(SEOTaskHistory.project_id == project.id).order_by(SEOTaskHistory.created_at)).all()
     return {
         "format": BUNDLE_FORMAT,
         "version": BUNDLE_VERSION,
@@ -243,7 +249,10 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
         "activity_categories": [{"source_id": item.id, "name": item.name, "color": item.color, "created_at": _iso(item.created_at)} for item in activity_categories],
         "issue_snapshots": [{"source_id": item.id, "batch_source_id": item.import_batch_id, "page_source_id": item.page_id, "issue_key": item.issue_key, "issue_source": item.issue_source, "issue_type": item.issue_type, "category": item.category, "severity": item.severity, "label": item.label, "url": item.url, "detail": item.detail, "evidence": item.evidence, "observed_on": _iso(item.observed_on), "observed_at": _iso(item.observed_at)} for item in issue_snapshots],
         "issue_snapshot_runs": [{"source_id": item.id, "batch_source_id": item.import_batch_id, "observed_on": _iso(item.observed_on), "observed_at": _iso(item.observed_at), "outstanding_count": item.outstanding_count, "new_count": item.new_count, "resolved_count": item.resolved_count, "baseline": item.baseline} for item in issue_snapshot_runs],
-        "seo_activities": [{"source_id": item.id, "category_source_id": item.category_id, "page_source_id": item.page_id, "batch_source_id": item.import_batch_id, "recommendation_source_id": item.recommendation_id, "solution_source_id": item.issue_solution_id, "related_activity_source_id": item.related_activity_id, "event_key": item.event_key, "source": item.source, "section": item.section, "action_type": item.action_type, "status": item.status, "title": item.title, "notes": item.notes, "url": item.url, "issue_key": item.issue_key, "issue_type": item.issue_type, "before_data": item.before_data, "after_data": item.after_data, "activity_metadata": item.activity_metadata, "occurred_at": _iso(item.occurred_at), "created_at": _iso(item.created_at)} for item in seo_activities],
+        "roadmap_periods": [{"source_id": item.id, "year": item.year, "name": item.name, "position": item.position, "start_month": item.start_month, "end_month": item.end_month, "created_at": _iso(item.created_at), "updated_at": _iso(item.updated_at)} for item in roadmap_periods],
+        "seo_tasks": [{"source_id": item.id, "period_source_id": item.roadmap_period_id, "title": item.title, "description": item.description, "category": item.category, "priority": item.priority, "status": item.status, "assigned_to": item.assigned_to, "start_date": _iso(item.start_date), "due_date": _iso(item.due_date), "completion_date": _iso(item.completion_date), "completion_notes": item.completion_notes, "scheduled_year": item.scheduled_year, "scheduled_month": item.scheduled_month, "scheduled_week": _iso(item.scheduled_week), "related_urls": item.related_urls, "supporting_links": item.supporting_links, "notes": item.notes, "source_issue_key": item.source_issue_key, "source_issue_type": item.source_issue_type, "source_section": item.source_section, "source_url": item.source_url, "recommendation_source_id": item.source_recommendation_id, "verified_resolution": item.verified_resolution, "verification_data": item.verification_data, "created_at": _iso(item.created_at), "updated_at": _iso(item.updated_at)} for item in seo_tasks],
+        "seo_task_history": [{"source_id": item.id, "task_source_id": item.task_id, "event_type": item.event_type, "before_data": item.before_data, "after_data": item.after_data, "notes": item.notes, "created_at": _iso(item.created_at)} for item in seo_task_history],
+        "seo_activities": [{"source_id": item.id, "category_source_id": item.category_id, "page_source_id": item.page_id, "batch_source_id": item.import_batch_id, "recommendation_source_id": item.recommendation_id, "solution_source_id": item.issue_solution_id, "task_source_id": item.task_id, "related_activity_source_id": item.related_activity_id, "event_key": item.event_key, "source": item.source, "section": item.section, "action_type": item.action_type, "status": item.status, "title": item.title, "notes": item.notes, "url": item.url, "issue_key": item.issue_key, "issue_type": item.issue_type, "before_data": item.before_data, "after_data": item.after_data, "activity_metadata": item.activity_metadata, "occurred_at": _iso(item.occurred_at), "created_at": _iso(item.created_at)} for item in seo_activities],
     }
 
 
@@ -271,7 +280,7 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
     source_project = bundle.get("project")
     if not isinstance(source_project, dict) or not source_project.get("name") or not source_project.get("site_url"):
         raise HTTPException(422, "Project bundle is missing required project details")
-    collection_names = ("pages", "import_batches", "import_rows", "page_crawl_changes", "page_relationships", "sitemap_documents", "sitemap_entries", "page_metadata_observations", "page_metadata_recommendations", "page_metadata_changes", "on_page_audit_cases", "issue_solutions", "keywords", "keyword_metrics_snapshots", "ranking_observations", "gsc_query_page_performance", "ga4_page_performance", "topic_clusters", "keyword_groups", "keyword_group_memberships", "grouping_suggestions", "target_mappings", "cannibalization_cases", "cannibalization_evidence", "case_decisions", "review_history", "activity_categories", "issue_snapshots", "issue_snapshot_runs", "seo_activities")
+    collection_names = ("pages", "import_batches", "import_rows", "page_crawl_changes", "page_relationships", "sitemap_documents", "sitemap_entries", "page_metadata_observations", "page_metadata_recommendations", "page_metadata_changes", "on_page_audit_cases", "issue_solutions", "keywords", "keyword_metrics_snapshots", "ranking_observations", "gsc_query_page_performance", "ga4_page_performance", "topic_clusters", "keyword_groups", "keyword_group_memberships", "grouping_suggestions", "target_mappings", "cannibalization_cases", "cannibalization_evidence", "case_decisions", "review_history", "activity_categories", "issue_snapshots", "issue_snapshot_runs", "roadmap_periods", "seo_tasks", "seo_task_history", "seo_activities")
     if any(not isinstance(bundle.get(name, []), list) for name in collection_names):
         raise HTTPException(422, "Project bundle contains invalid record collections")
     try:
@@ -545,6 +554,19 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
             category = ActivityCategory(project_id=project.id, name=str(item.get("name") or "Restored category"), color=str(item.get("color") or "blue"), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone())
             db.add(category); db.flush()
             if item.get("source_id"): category_ids[str(item["source_id"])] = category.id
+        period_ids: dict[str, str] = {}
+        for item in bundle.get("roadmap_periods", []):
+            period = RoadmapPeriod(project_id=project.id, year=int(item.get("year") or date.today().year), name=str(item.get("name") or "Period"), position=int(item.get("position") or 1), start_month=int(item.get("start_month") or 1), end_month=int(item.get("end_month") or 3), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone(), updated_at=_datetime(item.get("updated_at")) or datetime.now().astimezone())
+            db.add(period); db.flush()
+            if item.get("source_id"): period_ids[str(item["source_id"])] = period.id
+        task_ids: dict[str, str] = {}
+        for item in bundle.get("seo_tasks", []):
+            task = SEOTask(project_id=project.id, roadmap_period_id=period_ids.get(str(item.get("period_source_id"))) if item.get("period_source_id") else None, title=str(item.get("title") or "Restored task"), description=item.get("description"), category=str(item.get("category") or "General"), priority=str(item.get("priority") or "medium"), status=str(item.get("status") or "to_do"), assigned_to=item.get("assigned_to"), start_date=_date(item.get("start_date")), due_date=_date(item.get("due_date")), completion_date=_date(item.get("completion_date")), completion_notes=item.get("completion_notes"), scheduled_year=item.get("scheduled_year"), scheduled_month=item.get("scheduled_month"), scheduled_week=_date(item.get("scheduled_week")), related_urls=item.get("related_urls") or [], supporting_links=item.get("supporting_links") or [], notes=item.get("notes"), source_issue_key=item.get("source_issue_key"), source_issue_type=item.get("source_issue_type"), source_section=item.get("source_section"), source_url=item.get("source_url"), source_recommendation_id=recommendation_ids.get(str(item.get("recommendation_source_id"))) if item.get("recommendation_source_id") else None, verified_resolution=bool(item.get("verified_resolution", False)), verification_data=item.get("verification_data") or {}, created_at=_datetime(item.get("created_at")) or datetime.now().astimezone(), updated_at=_datetime(item.get("updated_at")) or datetime.now().astimezone())
+            db.add(task); db.flush()
+            if item.get("source_id"): task_ids[str(item["source_id"])] = task.id
+        for item in bundle.get("seo_task_history", []):
+            task_id = task_ids.get(str(item.get("task_source_id")))
+            if task_id: db.add(SEOTaskHistory(project_id=project.id, task_id=task_id, event_type=str(item.get("event_type") or "restored"), before_data=item.get("before_data") or {}, after_data=item.get("after_data") or {}, notes=item.get("notes"), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone()))
         for item in bundle.get("issue_snapshots", []):
             old_page_id = str(item.get("page_source_id")) if item.get("page_source_id") else None
             page_id = page_ids.get(old_page_id) if old_page_id else None
@@ -560,7 +582,7 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
             page_id = page_ids.get(old_page_id) if old_page_id else None
             issue_key = item.get("issue_key")
             if issue_key and old_page_id and page_id: issue_key = str(issue_key).replace(f":{old_page_id}", f":{page_id}", 1)
-            activity = SEOActivity(project_id=project.id, category_id=category_ids.get(str(item.get("category_source_id"))) if item.get("category_source_id") else None, page_id=page_id, import_batch_id=batch_ids.get(str(item.get("batch_source_id"))) if item.get("batch_source_id") else None, recommendation_id=recommendation_ids.get(str(item.get("recommendation_source_id"))) if item.get("recommendation_source_id") else None, issue_solution_id=solution_ids.get(str(item.get("solution_source_id"))) if item.get("solution_source_id") else None, event_key=str(item.get("event_key") or item.get("source_id") or uid()), source=str(item.get("source") or "restored"), section=str(item.get("section") or "general"), action_type=str(item.get("action_type") or "restored_activity"), status=str(item.get("status") or "completed"), title=str(item.get("title") or "Restored activity"), notes=item.get("notes"), url=item.get("url"), issue_key=issue_key, issue_type=item.get("issue_type"), before_data=item.get("before_data") or {}, after_data=item.get("after_data") or {}, activity_metadata=item.get("activity_metadata") or {}, occurred_at=_datetime(item.get("occurred_at")) or datetime.now().astimezone(), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone())
+            activity = SEOActivity(project_id=project.id, category_id=category_ids.get(str(item.get("category_source_id"))) if item.get("category_source_id") else None, page_id=page_id, import_batch_id=batch_ids.get(str(item.get("batch_source_id"))) if item.get("batch_source_id") else None, recommendation_id=recommendation_ids.get(str(item.get("recommendation_source_id"))) if item.get("recommendation_source_id") else None, issue_solution_id=solution_ids.get(str(item.get("solution_source_id"))) if item.get("solution_source_id") else None, task_id=task_ids.get(str(item.get("task_source_id"))) if item.get("task_source_id") else None, event_key=str(item.get("event_key") or item.get("source_id") or uid()), source=str(item.get("source") or "restored"), section=str(item.get("section") or "general"), action_type=str(item.get("action_type") or "restored_activity"), status=str(item.get("status") or "completed"), title=str(item.get("title") or "Restored activity"), notes=item.get("notes"), url=item.get("url"), issue_key=issue_key, issue_type=item.get("issue_type"), before_data=item.get("before_data") or {}, after_data=item.get("after_data") or {}, activity_metadata=item.get("activity_metadata") or {}, occurred_at=_datetime(item.get("occurred_at")) or datetime.now().astimezone(), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone())
             db.add(activity); db.flush()
             if item.get("source_id"): activity_ids[str(item["source_id"])] = activity.id
             if item.get("related_activity_source_id"): pending_related.append((activity, str(item["related_activity_source_id"])))
@@ -586,6 +608,9 @@ def delete_project_records(db: Session, project: Project) -> dict[str, int]:
     db.execute(delete(SitemapDocument).where(SitemapDocument.project_id == project.id))
     # Delete future-phase dependants before their parent Page/Keyword records.
     db.execute(delete(SEOActivity).where(SEOActivity.project_id == project.id))
+    db.execute(delete(SEOTaskHistory).where(SEOTaskHistory.project_id == project.id))
+    db.execute(delete(SEOTask).where(SEOTask.project_id == project.id))
+    db.execute(delete(RoadmapPeriod).where(RoadmapPeriod.project_id == project.id))
     db.execute(delete(IssueSnapshot).where(IssueSnapshot.project_id == project.id))
     db.execute(delete(IssueSnapshotRun).where(IssueSnapshotRun.project_id == project.id))
     db.execute(delete(ActivityCategory).where(ActivityCategory.project_id == project.id))

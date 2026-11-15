@@ -30,6 +30,7 @@ from .routes.on_page import router as on_page_router
 from .routes.keywords import router as keywords_router
 from .routes.strategy import router as strategy_router
 from .routes.activity import router as activity_router
+from .routes.tasks import router as tasks_router
 from .services.activity import add_activity
 from .services.on_page import latest_metadata, on_page_issues
 from .services.architecture import architecture_issues
@@ -52,6 +53,7 @@ app.include_router(on_page_router)
 app.include_router(keywords_router)
 app.include_router(strategy_router)
 app.include_router(activity_router)
+app.include_router(tasks_router)
 
 
 def project_or_404(db: Session, project_id: str) -> Project:
