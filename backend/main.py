@@ -7,9 +7,10 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pandas as pd
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from .database import DATABASE_URL, get_db
 from .migrations import run_startup_migrations
 from .paths import BACKUP_DIR, STATIC_DIR, is_packaged
-from .runtime_control import request_shutdown, runtime_enabled
+from .runtime_control import automatic_shutdown_enabled, browser_session_active, register_browser_session, request_shutdown, runtime_status as runtime_state, unregister_browser_session
 from .models import AuditCase, CannibalizationCase, GA4PagePerformance, GSCQueryPagePerformance, ImportBatch, ImportRow, IssueSolution, KeywordGroup, KeywordGroupMembership, Page, PageCrawlChange, PageMetadataRecommendation, PageType, Project, RankingObservation, SitemapEntry, TargetMapping
 from .schemas import BulkTypeUpdate, ConfirmImport, ImportOut, IssuePriorityUpdate, IssueSolutionCreate, IssueTypePriorityUpdate, ManualPageCreate, PageManualOverrideUpdate, PageOut, ProjectCreate, ProjectOut, ProjectUpdate
 from .services.imports import confirm_import, stage_upload
@@ -37,6 +38,7 @@ from .services.architecture import architecture_issues
 from .services.page_signals import EDITABLE_FIELDS, matches_url, page_signals
 from .services.issue_priorities import ISSUE_TYPE_DEFINITIONS, PRIORITY_LEVELS, preference_key, priority_catalog
 from .services.keywords import confirm_keyword_import, current_keyword_rows
+from .services.internal_links import effective_internal_inlinks, latest_snapshot as latest_internal_link_snapshot, page_crawl_link_metrics, page_link_counts
 
 
 @asynccontextmanager
@@ -77,7 +79,35 @@ def health():
 
 @app.get("/api/runtime/status")
 def runtime_status():
-    return {"local_runtime": runtime_enabled()}
+    return runtime_state()
+
+
+def _allowed_runtime_origin(origin: str | None) -> bool:
+    if not origin:
+        return False
+    parsed = urlsplit(origin)
+    return parsed.scheme in {"http", "https"} and (parsed.hostname or "").casefold() in {"127.0.0.1", "localhost", "::1"}
+
+
+@app.websocket("/api/runtime/session")
+async def runtime_browser_session(websocket: WebSocket):
+    if not automatic_shutdown_enabled() or not _allowed_runtime_origin(websocket.headers.get("origin")):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    session_id = register_browser_session()
+    if not session_id:
+        await websocket.close(code=1012)
+        return
+    try:
+        while browser_session_active(session_id):
+            message = await websocket.receive_text()
+            if message == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        pass
+    finally:
+        unregister_browser_session(session_id)
 
 
 @app.post("/api/runtime/shutdown")
@@ -131,10 +161,27 @@ def unified_issue_rows(db: Session, project: Project, status: str = "open") -> l
     solutions = db.scalars(select(IssueSolution).where(IssueSolution.project_id == project.id).order_by(IssueSolution.created_at.desc())).all()
     for solution in solutions:
         solution_groups.setdefault((solution.issue_source, solution.issue_key), []).append(solution)
+    page_ids = {issue.get("page_id") for issue in rows if issue.get("page_id")}
+    page_types = {page.id: page.page_type for page in db.scalars(select(Page).where(Page.id.in_(page_ids)))} if page_ids else {}
+    recommendations = {item.page_id: item for item in db.scalars(select(PageMetadataRecommendation).where(PageMetadataRecommendation.project_id == project.id, PageMetadataRecommendation.page_id.in_(page_ids)))} if page_ids else {}
     for issue in rows:
         matches = solution_groups.get((issue["source"], issue["issue_key"]), [])
         issue["solution_count"] = len(matches)
         issue["latest_solution"] = serialize_issue_solution(matches[0]) if matches else None
+        issue["status"] = matches[0].workflow_status if matches else issue.get("status", "open")
+        issue["page_type"] = page_types.get(issue.get("page_id"))
+        recommended_solution = matches[0].summary if matches else issue.get("recommendation")
+        recommendation = recommendations.get(issue.get("page_id"))
+        if not recommended_solution and recommendation:
+            if recommendation.notes:
+                recommended_solution = recommendation.notes
+            else:
+                values = []
+                for key, value in (recommendation.data or {}).items():
+                    if value not in (None, "", [], {}):
+                        values.append(f"{key.replace('_', ' ')}: {json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else value}")
+                recommended_solution = "; ".join(values) or None
+        issue["recommended_solution"] = recommended_solution
     return rows
 
 
@@ -199,7 +246,7 @@ def reset_issue_type_priorities(project_id: str, db: Session = Depends(get_db)):
     return {"reset": len(previous)}
 
 
-@app.patch("/api/projects/{project_id}/issues/{issue_key}/priority")
+@app.patch("/api/projects/{project_id}/issues/{issue_key:path}/priority")
 def update_issue_priority(project_id: str, issue_key: str, payload: IssuePriorityUpdate, db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
     if payload.priority not in {None, *PRIORITY_LEVELS}:
@@ -537,6 +584,8 @@ def list_pages(
     candidates = list(db.scalars(base.order_by(sort_column.asc() if direction == "asc" else sort_column.desc())))
     candidate_ids = [item.id for item in candidates]
     sitemap_counts = dict(db.execute(select(SitemapEntry.page_id, func.count(SitemapEntry.id)).where(SitemapEntry.project_id == project_id, SitemapEntry.page_id.in_(candidate_ids)).group_by(SitemapEntry.page_id)).all()) if candidate_ids else {}
+    link_counts = page_link_counts(db, project_id)
+    link_snapshot = latest_internal_link_snapshot(db, project_id)
     snapshots = latest_metadata(db, project.id)
     enriched = [(item, page_signals(item, snapshots.get(item.id), sitemap_counts.get(item.id, 0), project.preferences)) for item in candidates]
     if url_value:
@@ -568,6 +617,16 @@ def list_pages(
         serialized["in_imported_sitemap"] = bool(sitemap_counts.get(item.id, 0))
         serialized["effective"] = signals
         serialized["available_metrics"] = (item.crawl_data or {}).get("raw_columns", {})
+        observed = link_counts.get(item.id, {"inlinks": 0, "unique_sources": 0}) if link_snapshot else {"inlinks": None, "unique_sources": None}
+        page_metrics = page_crawl_link_metrics(item)
+        internal_inlinks, internal_inlinks_source = effective_internal_inlinks(item, observed["inlinks"])
+        serialized.update({
+            "inlinks": observed["inlinks"],
+            "unique_sources": observed["unique_sources"],
+            "internal_inlinks": internal_inlinks,
+            "internal_inlinks_source": internal_inlinks_source,
+            "crawl_depth": page_metrics["crawl_depth"],
+        })
         payload.append(serialized)
     return {"items": payload, "total": total, "page": page, "page_size": page_size}
 
@@ -584,6 +643,11 @@ def page_detail(project_id: str, page_id: str, db: Session = Depends(get_db)):
     snapshot = latest_metadata(db, project_id).get(page.id)
     payload["effective"] = page_signals(page, snapshot, sitemap_count, page.project.preferences)
     payload["available_metrics"] = (page.crawl_data or {}).get("raw_columns", {})
+    link_snapshot = latest_internal_link_snapshot(db, project_id)
+    observed = page_link_counts(db, project_id).get(page.id, {"inlinks": 0, "unique_sources": 0}) if link_snapshot else {"inlinks": None, "unique_sources": None}
+    page_metrics = page_crawl_link_metrics(page)
+    internal_inlinks, internal_inlinks_source = effective_internal_inlinks(page, observed["inlinks"])
+    payload.update({**observed, "internal_inlinks": internal_inlinks, "internal_inlinks_source": internal_inlinks_source, "crawl_depth": page_metrics["crawl_depth"]})
     return payload
 
 
@@ -721,7 +785,7 @@ def page_urls(project_id: str, format: str = "json", search: str | None = None, 
 @app.post("/api/projects/{project_id}/imports/stage", status_code=201)
 async def stage_import(project_id: str, source: str = Form("screaming_frog"), reporting_date: date | None = Form(None), file: UploadFile = File(...), db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
-    if source not in {"screaming_frog", "url_list", "semrush", "gsc", "ga4"}:
+    if source not in {"screaming_frog", "screaming_frog_inlinks", "url_list", "semrush", "gsc", "ga4"}:
         raise HTTPException(422, "Unsupported import source")
     result = await stage_upload(db, project, file, source, reporting_date)
     result["batch"] = ImportOut.model_validate(result["batch"]).model_dump(mode="json")
@@ -738,6 +802,9 @@ def import_confirm(project_id: str, batch_id: str, payload: ConfirmImport, db: S
         raise HTTPException(409, "This import is already complete")
     if batch.source in {"semrush", "gsc", "ga4"}:
         return confirm_keyword_import(db, batch, project, payload.mapping)
+    if batch.source == "screaming_frog_inlinks":
+        from .services.internal_links import confirm_internal_link_import
+        return confirm_internal_link_import(db, batch, project, payload.mapping, payload.headers_verified, payload.complete_snapshot)
     return confirm_import(db, batch, project, payload.mapping, payload.duplicate_strategy, payload.headers_verified)
 
 

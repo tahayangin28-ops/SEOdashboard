@@ -17,8 +17,10 @@ import { SavedKeywords } from './pages/SavedKeywords'
 import { KeywordStrategy } from './pages/KeywordStrategy'
 import { ActivityProgress } from './pages/ActivityProgress'
 import { TaskManager } from './pages/TaskManager'
+import { useRuntimeSession } from './hooks/useRuntimeSession'
 
 export default function App(){
+  useRuntimeSession()
   const [projects,setProjects]=useState<Project[]>([]); const [activeId,setActiveId]=useState(localStorage.getItem('seo-project')||''); const [loading,setLoading]=useState(true); const [error,setError]=useState(''); const [showNew,setShowNew]=useState(false)
   async function refreshProjects(preferredId?:string){const items=await api<Project[]>('/api/projects?include_archived=true');setProjects(items);const active=items.filter(p=>!p.archived);const wanted=preferredId||activeId;if(!active.some(p=>p.id===wanted))setActiveId(active[0]?.id||'')}
   useEffect(()=>{refreshProjects().catch(e=>setError(e.message)).finally(()=>setLoading(false))},[])

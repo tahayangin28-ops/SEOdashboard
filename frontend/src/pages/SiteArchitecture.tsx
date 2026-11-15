@@ -9,8 +9,9 @@ import { CheckboxFilter, FILTER_NONE, filterSelectionCount, toggleFilterSelectio
 import { SummaryActionCard } from '../components/SummaryActionCard'
 import type { ArchitectureInventoryItem, ArchitectureIssue, ArchitectureProposal, ArchitectureSummary, ArchitectureTreeNode, ArchitectureTreeScope, Project, SitemapDocument } from '../types'
 import { LIVE_PAGE_TYPES } from '../types'
+import { InternalLinkingAnalysis } from './InternalLinkingAnalysis'
 
-type View = 'Inventory'|'Sitemap XML'|'Hierarchy Map'|'Issues'
+type View = 'Inventory'|'Sitemap XML'|'Hierarchy Map'|'Internal Linking Analysis'|'Issues'
 const architectureHelper=createColumnHelper<ArchitectureInventoryItem>()
 const ARCHITECTURE_COLUMN_LABELS:Record<string,string>={route:'Route / URL',page_type:'Type',eligibility:'Sitemap eligibility',section:'Section',path_depth:'Path depth',hierarchy_depth:'Hierarchy depth',parent:'Primary parent',proposed_sitemap:'Proposed XML Sitemap',imported_sitemap:'Imported XML'}
 const INCLUSION_OPTIONS=[['included','Proposed: included'],['excluded','Proposed: excluded'],['unreviewed','Proposed: unreviewed']] as const
@@ -27,13 +28,15 @@ function toggled(current:string[],value:string,checked:boolean){return toggleFil
 
 export function SiteArchitecture({project}:{project:Project}){
   const [searchParams]=useSearchParams()
-  const [view,setView]=useState<View>(searchParams.get('view')==='issues'?'Issues':'Inventory'),[summary,setSummary]=useState<ArchitectureSummary>(),[refresh,setRefresh]=useState(0)
+  const requestedView=searchParams.get('view')
+  const initialView:View=requestedView==='issues'?'Issues':requestedView==='internal-links'?'Internal Linking Analysis':'Inventory'
+  const [view,setView]=useState<View>(initialView),[summary,setSummary]=useState<ArchitectureSummary>(),[refresh,setRefresh]=useState(0)
   const reload=()=>setRefresh(value=>value+1)
   useEffect(()=>{api<ArchitectureSummary>(`/api/projects/${project.id}/architecture/summary`).then(setSummary)},[project.id,refresh])
   return <div className="page architecture-page"><div className="page-heading compact"><div><p className="eyebrow">PLANNED SITE STRUCTURE</p><h1>Site Architecture</h1><p>Maintain sitemap membership and an explicit, reviewable page hierarchy.</p></div><a className="secondary button" href={`/api/projects/${project.id}/architecture/adjacency.csv`}><Icon name="download"/>Adjacency CSV</a></div>
     <section className="metric-grid architecture-metrics"><SummaryActionCard label="Inventory pages" value={summary?.total_pages.toLocaleString()??'—'} detail="Known live page records" action={view==='Inventory'?'Current view':'Open inventory'} active={view==='Inventory'} onClick={()=>setView('Inventory')}/><SummaryActionCard label="Proposed sitemap" value={summary?.proposed_included.toLocaleString()??'—'} detail={`${summary?.unreviewed.toLocaleString()??'—'} awaiting review`} action={view==='Sitemap XML'?'Current view':'Review sitemap'} active={view==='Sitemap XML'} onClick={()=>setView('Sitemap XML')}/><SummaryActionCard label="Approved parents" value={summary?.approved_relationships.toLocaleString()??'—'} detail={`${summary?.proposed_relationships.toLocaleString()??'—'} path proposals`} action={view==='Hierarchy Map'?'Current view':'Open hierarchy'} active={view==='Hierarchy Map'} onClick={()=>setView('Hierarchy Map')}/><SummaryActionCard label="Review issues" value={summary?.issues.toLocaleString()??'—'} detail={`${summary?.unresolved_references.toLocaleString()??'—'} unresolved sitemap references`} action={view==='Issues'?'Current view':'Open review queue'} active={view==='Issues'} attention={Boolean(summary?.issues)} onClick={()=>setView('Issues')}/></section>
-    <div className="tabs architecture-tabs" role="tablist">{(['Inventory','Sitemap XML','Hierarchy Map','Issues'] as View[]).map(item=><button key={item} role="tab" aria-selected={view===item} className={view===item?'active':''} onClick={()=>setView(item)}>{item}</button>)}</div>
-    {view==='Inventory'&&<ArchitectureInventory project={project} onChanged={reload} refresh={refresh}/>} {view==='Sitemap XML'&&<SitemapWorkspace project={project} onChanged={reload} refresh={refresh}/>} {view==='Hierarchy Map'&&<HierarchyWorkspace project={project} onChanged={reload} refresh={refresh}/>} {view==='Issues'&&<IssuesWorkspace project={project} refresh={refresh}/>} </div>
+    <div className="tabs architecture-tabs" role="tablist">{(['Inventory','Sitemap XML','Hierarchy Map','Internal Linking Analysis','Issues'] as View[]).map(item=><button key={item} role="tab" aria-selected={view===item} className={view===item?'active':''} onClick={()=>setView(item)}>{item}</button>)}</div>
+    {view==='Inventory'&&<ArchitectureInventory project={project} onChanged={reload} refresh={refresh}/>} {view==='Sitemap XML'&&<SitemapWorkspace project={project} onChanged={reload} refresh={refresh}/>} {view==='Hierarchy Map'&&<HierarchyWorkspace project={project} onChanged={reload} refresh={refresh}/>} {view==='Internal Linking Analysis'&&<InternalLinkingAnalysis project={project}/>} {view==='Issues'&&<IssuesWorkspace project={project} refresh={refresh}/>} </div>
 }
 
 function ArchitectureInventory({project,onChanged,refresh}:{project:Project;onChanged:()=>void;refresh:number}){

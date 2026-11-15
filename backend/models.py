@@ -104,6 +104,52 @@ class ImportRow(Base):
     page_id: Mapped[str | None] = mapped_column(ForeignKey("pages.id"))
 
 
+class InternalLinkSnapshot(Base):
+    __tablename__ = "internal_link_snapshots"
+    __table_args__ = (UniqueConstraint("import_batch_id", name="uq_internal_link_snapshot_batch"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    import_batch_id: Mapped[str] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    complete_snapshot: Mapped[bool] = mapped_column(Boolean, default=False)
+    internal_count: Mapped[int] = mapped_column(Integer, default=0)
+    external_count: Mapped[int] = mapped_column(Integer, default=0)
+    unmatched_count: Mapped[int] = mapped_column(Integer, default=0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class InternalLinkObservation(Base):
+    """One supplied Inlinks row. Repeated source/destination pairs remain evidence."""
+
+    __tablename__ = "internal_link_observations"
+    __table_args__ = (UniqueConstraint("import_batch_id", "row_number", name="uq_internal_link_batch_row"),)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    snapshot_id: Mapped[str] = mapped_column(ForeignKey("internal_link_snapshots.id"), index=True)
+    import_batch_id: Mapped[str] = mapped_column(ForeignKey("import_batches.id"), index=True)
+    row_number: Mapped[int] = mapped_column(Integer)
+    source_page_id: Mapped[str | None] = mapped_column(ForeignKey("pages.id"), index=True)
+    destination_page_id: Mapped[str | None] = mapped_column(ForeignKey("pages.id"), index=True)
+    source_url: Mapped[str] = mapped_column(String(4096))
+    normalized_source_url: Mapped[str | None] = mapped_column(String(4096), index=True)
+    destination_url: Mapped[str] = mapped_column(String(4096))
+    normalized_destination_url: Mapped[str | None] = mapped_column(String(4096), index=True)
+    is_internal: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    link_type: Mapped[str | None] = mapped_column(String(120))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    alt_text: Mapped[str | None] = mapped_column(Text)
+    anchor: Mapped[str | None] = mapped_column(Text)
+    status_code: Mapped[int | None] = mapped_column(Integer, index=True)
+    status_text: Mapped[str | None] = mapped_column(String(255))
+    follow: Mapped[str | None] = mapped_column(String(80))
+    target: Mapped[str | None] = mapped_column(String(255))
+    rel: Mapped[str | None] = mapped_column(String(500))
+    path_type: Mapped[str | None] = mapped_column(String(120))
+    link_path: Mapped[str | None] = mapped_column(Text)
+    link_position: Mapped[str | None] = mapped_column(String(120), index=True)
+    link_origin: Mapped[str | None] = mapped_column(String(120), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class PageCrawlChange(Base):
     __tablename__ = "page_crawl_changes"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)

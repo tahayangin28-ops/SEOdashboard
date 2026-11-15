@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..models import ImportBatch, ImportRow, Page, PageCrawlChange, PageMetadataObservation, PageType, Project
 from .drafts import is_successful_html, mark_draft_live, materialize_legacy_draft_targets
-from .screaming_frog import recognize_headers, semantic_field_options, suggested_semantic_mapping
+from .screaming_frog import SCREAMING_FROG_INLINK_FIELDS, recognize_headers, semantic_field_options, suggested_semantic_mapping
 from .page_types import is_obvious_asset
 from .urls import normalize_url
 from .keywords import keyword_semantic_fields, suggested_keyword_mapping
@@ -84,7 +84,8 @@ async def stage_upload(db: Session, project: Project, upload: UploadFile, source
     warnings = []
     if db.scalar(select(ImportBatch).where(ImportBatch.project_id == project.id, ImportBatch.checksum == checksum)):
         warnings.append("This exact file has been uploaded before for this project.")
-    recognition = recognize_headers(columns) if source == "screaming_frog" else []
+    recognition_fields = SCREAMING_FROG_INLINK_FIELDS if source == "screaming_frog_inlinks" else None
+    recognition = recognize_headers(columns, recognition_fields) if source in {"screaming_frog", "screaming_frog_inlinks"} else []
     mapping = suggested_keyword_mapping(columns, source) if source in {"semrush", "gsc", "ga4"} else suggested_semantic_mapping(recognition) if recognition else suggested_mapping(columns, source)
     verification_count = sum(item["confidence"] != "exact" for item in recognition)
     if verification_count:
@@ -104,7 +105,7 @@ async def stage_upload(db: Session, project: Project, upload: UploadFile, source
         "detection": detection,
         "warnings": warnings,
         "header_recognition": recognition,
-        "semantic_fields": keyword_semantic_fields(source) if source in {"semrush", "gsc", "ga4"} else semantic_field_options(recognition) if recognition else [],
+        "semantic_fields": keyword_semantic_fields(source) if source in {"semrush", "gsc", "ga4"} else semantic_field_options(recognition, recognition_fields) if recognition else [],
         "requires_header_verification": verification_count > 0,
     }
 
@@ -232,11 +233,12 @@ def confirm_import(db: Session, batch: ImportBatch, project: Project, mapping: d
                 row.page_id = page.id
                 skipped += 1
                 continue
+            previous_crawl = page.crawl_data or {}
             page.crawl_data = {
                 "batch_id": batch.id,
                 "file_name": batch.file_name,
                 "imported_at": batch.imported_at.isoformat(),
-                "recognized": recognized_fields,
+                "recognized": {**(previous_crawl.get("recognized") or {}), **recognized_fields},
                 "raw_columns": row.raw_data,
                 "mapping": mapping,
             }

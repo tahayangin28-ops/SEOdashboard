@@ -31,7 +31,7 @@ from .architecture import architecture_issues
 from .on_page import latest_metadata, on_page_issues
 
 ACTIVITY_STATUSES = {"in_progress", "ignored", "completed", "resolved", "changed"}
-ACTIVITY_SECTIONS = {"pages", "site_architecture", "on_page", "keyword", "performance"}
+ACTIVITY_SECTIONS = {"pages", "site_architecture", "on_page", "keyword", "performance", "task_manager"}
 LEGACY_SECTION_MAP = {"general": "pages", "import": "pages", "keywords": "keyword"}
 
 
@@ -133,6 +133,17 @@ def activity_display_title(item: SEOActivity, related: dict[str, SEOActivity] | 
 def serialize_activity(item: SEOActivity, category_name: str | None = None, related: dict[str, SEOActivity] | None = None) -> dict:
     status = "in_progress" if item.status == "suggestion" else item.status
     section = LEGACY_SECTION_MAP.get(item.section, item.section)
+    if item.task_id or item.source == "task_manager":
+        section = "task_manager"
+    elif item.related_activity_id and related:
+        parent = related.get(item.related_activity_id)
+        seen = {item.id}
+        while parent and parent.id not in seen:
+            seen.add(parent.id)
+            if parent.task_id or parent.source == "task_manager":
+                section = "task_manager"
+                break
+            parent = related.get(parent.related_activity_id) if parent.related_activity_id else None
     return {
         "id": item.id,
         "project_id": item.project_id,
@@ -164,12 +175,23 @@ def serialize_activity(item: SEOActivity, category_name: str | None = None, rela
 def ensure_activity_backfill(db: Session, project_id: str) -> int:
     """Make pre-feature recommendation, solution, and crawl records visible once."""
     created = 0
-    for activity in db.scalars(select(SEOActivity).where(SEOActivity.project_id == project_id)):
+    activities = list(db.scalars(select(SEOActivity).where(SEOActivity.project_id == project_id)))
+    task_activity_ids = {activity.id for activity in activities if activity.task_id or activity.source == "task_manager"}
+    changed = True
+    while changed:
+        changed = False
+        for activity in activities:
+            if activity.related_activity_id in task_activity_ids and activity.id not in task_activity_ids:
+                task_activity_ids.add(activity.id)
+                changed = True
+    for activity in activities:
         canonical_status = "in_progress" if activity.status == "suggestion" else activity.status
         canonical_section = LEGACY_SECTION_MAP.get(activity.section, activity.section)
         if activity.action_type == "page_metrics_changed":
             canonical_status = "changed"
             canonical_section = "pages"
+        if activity.id in task_activity_ids:
+            canonical_section = "task_manager"
         if activity.status != canonical_status or activity.section != canonical_section:
             activity.status = canonical_status
             activity.section = canonical_section
@@ -315,7 +337,7 @@ def record_issue_snapshot(db: Session, project: Project, batch: ImportBatch) -> 
             task.verification_data = {"import_batch_id": batch.id, "file_name": batch.file_name, "verified_at": observed_at.isoformat(), "issue_present": False}
             db.add(SEOTaskHistory(project_id=project.id, task_id=task.id, event_type="verified_resolved", before_data=before_task, after_data={"verified_resolution": True, **task.verification_data}, notes="The latest crawl no longer detects the linked issue."))
             add_activity(db, project.id, event_key=f"task-verified:{batch.checksum}:{task.id}", task_id=task.id,
-                source="crawl_comparison", section=old.issue_source, action_type="task_verified_resolved", status="resolved", title=task.title,
+                source="crawl_comparison", section="task_manager", action_type="task_verified_resolved", status="resolved", title=task.title,
                 notes="The linked issue is no longer detected in the latest crawl. Task completion is recorded separately and is not treated as proof of causation.",
                 import_batch_id=batch.id, url=old.url, issue_key=key, issue_type=old.issue_type,
                 before_data=before_task, after_data={"verified_resolution": True, **task.verification_data}, occurred_at=observed_at,

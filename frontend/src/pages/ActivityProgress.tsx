@@ -5,8 +5,8 @@ import { SummaryActionCard } from '../components/SummaryActionCard'
 import type { ActivityCategory, MonthlyComparison, Project, SEOActivity } from '../types'
 
 const statuses=['in_progress','ignored','completed','resolved','changed']
-const sections=['pages','site_architecture','on_page','keyword','performance']
-const labels:Record<string,string>={pages:'Pages',site_architecture:'Site Architecture',on_page:'On-Page SEO',keyword:'Keyword',performance:'Performance',in_progress:'In Progress',ignored:'Ignored',completed:'Completed',resolved:'Resolved',changed:'Changed'}
+const sections=['pages','site_architecture','on_page','keyword','performance','task_manager']
+const labels:Record<string,string>={pages:'Pages',site_architecture:'Site Architecture',on_page:'On-Page SEO',keyword:'Keyword',performance:'Performance',task_manager:'Task Manager',in_progress:'In Progress',ignored:'Ignored',completed:'Completed',resolved:'Resolved',changed:'Changed'}
 const label=(value:string)=>labels[value]||value.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase())
 const currentMonth=()=>new Date().toISOString().slice(0,7)
 const priorMonth=(month:string)=>{const [year,value]=month.split('-').map(Number);return new Date(Date.UTC(year,value-2,1)).toISOString().slice(0,7)}

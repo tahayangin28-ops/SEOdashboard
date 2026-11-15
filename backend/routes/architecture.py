@@ -12,14 +12,116 @@ from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import Page, PageRelationship, PageType, Project, SitemapDocument, SitemapEntry
+from ..models import IssueSolution, Page, PageRelationship, PageType, Project, SitemapDocument, SitemapEntry
 from ..schemas import ArchitecturePageUpdate, BulkProposalApproval, BulkSitemapUpdate, HierarchyExportRequest, RelationshipCreate
 from ..services.architecture import approve_parent_proposals, architecture_issues, hierarchy_depths, parent_map, propose_parents, set_relationship, tree_nodes, tree_scopes
 from ..services.architecture_exports import hierarchy_svg, scope_filename
 from ..services.sitemaps import generate_sitemap_files, import_sitemap_bundle, proposed_sitemap_urls
 from ..services.activity import add_activity
+from ..services.internal_links import CATEGORIES, internal_link_findings, latest_snapshot, page_inlinks
 
 router = APIRouter(prefix="/api/projects/{project_id}/architecture", tags=["site-architecture"])
+
+
+@router.get("/internal-links/summary")
+def internal_links_summary(project_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    snapshot = latest_snapshot(db, project.id)
+    findings = internal_link_findings(db, project)
+    return {
+        "snapshot": None if not snapshot else {"id": snapshot.id, "observed_at": snapshot.observed_at, "complete": snapshot.complete_snapshot, "internal_links": snapshot.internal_count, "external_links": snapshot.external_count, "unmatched_links": snapshot.unmatched_count},
+        "total_findings": len(findings),
+        "critical": sum(item["priority"] == "critical" for item in findings),
+        "broken_links": sum(item["type"] == "broken_internal_link" for item in findings),
+        "potential_orphans": sum(item["type"] == "potential_orphan_page" for item in findings),
+        "weak_pages": sum(item["type"] == "weakly_linked_page" for item in findings),
+        "opportunities": sum(item["type"] == "internal_link_opportunity" for item in findings),
+        "categories": [{"key": key, "label": label, "count": sum(item["category_key"] == key for item in findings)} for key, label in CATEGORIES.items()],
+    }
+
+
+@router.get("/internal-links/settings")
+def internal_links_settings(project_id: str, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    values = (project.preferences or {}).get("internal_linking") or {}
+    return {"weak_inlinks": int(values.get("weak_inlinks", 3)), "deep_crawl_depth": int(values.get("deep_crawl_depth", 4))}
+
+
+@router.patch("/internal-links/settings")
+def update_internal_links_settings(project_id: str, payload: dict, db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    try:
+        weak, depth = int(payload.get("weak_inlinks", 3)), int(payload.get("deep_crawl_depth", 4))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "Thresholds must be whole numbers") from exc
+    if not 1 <= weak <= 100 or not 1 <= depth <= 100:
+        raise HTTPException(422, "Thresholds must be between 1 and 100")
+    preferences = dict(project.preferences or {})
+    preferences["internal_linking"] = {"weak_inlinks": weak, "deep_crawl_depth": depth}
+    project.preferences = preferences
+    add_activity(db, project.id, source="site_architecture", section="site_architecture", action_type="internal_link_settings_updated", status="changed", title="Updated internal-link analysis thresholds", after_data=preferences["internal_linking"])
+    db.commit()
+    return preferences["internal_linking"]
+
+
+@router.get("/internal-links/findings")
+def internal_links_findings(project_id: str, search: str | None = None, categories: list[str] | None = Query(None), priorities: list[str] | None = Query(None), page_types: list[str] | None = Query(None), db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    rows = internal_link_findings(db, project)
+    latest_solutions: dict[str, IssueSolution] = {}
+    for solution in db.scalars(select(IssueSolution).where(IssueSolution.project_id == project.id, IssueSolution.issue_source == "site_architecture").order_by(IssueSolution.created_at.desc())):
+        latest_solutions.setdefault(solution.issue_key, solution)
+    solution_counts = dict(db.execute(select(IssueSolution.issue_key, func.count(IssueSolution.id)).where(IssueSolution.project_id == project.id, IssueSolution.issue_source == "site_architecture").group_by(IssueSolution.issue_key)).all())
+    for row in rows:
+        solution = latest_solutions.get(row["issue_key"])
+        row["status"] = solution.workflow_status if solution else "open"
+        row["solution_count"] = solution_counts.get(row["issue_key"], 0)
+    if search:
+        needle = search.casefold()
+        rows = [row for row in rows if needle in " ".join(str(row.get(key) or "") for key in ("label", "detail", "url", "recommendation")).casefold()]
+    if categories:
+        rows = [row for row in rows if row["category_key"] in categories]
+    if priorities:
+        rows = [row for row in rows if row["priority"] in priorities]
+    if page_types:
+        rows = [row for row in rows if row.get("page_type") in page_types]
+    return {"items": rows, "total": len(rows)}
+
+
+@router.get("/internal-links/pages/{page_id}")
+def internal_links_page(project_id: str, page_id: str, db: Session = Depends(get_db)):
+    project_or_404(db, project_id)
+    page = db.get(Page, page_id)
+    if not page or page.project_id != project_id:
+        raise HTTPException(404, "Page not found")
+    return page_inlinks(db, project_id, page_id)
+
+
+@router.get("/internal-links/export.csv")
+def internal_links_export(project_id: str, category: str | None = None, priority: str | None = None, search: str | None = None, page_types: list[str] | None = Query(None), indexabilities: list[str] | None = Query(None), status_codes: list[str] | None = Query(None), db: Session = Depends(get_db)):
+    project = project_or_404(db, project_id)
+    rows = internal_link_findings(db, project)
+    if category:
+        rows = [row for row in rows if row["category_key"] == category]
+    if priority:
+        rows = [row for row in rows if row["priority"] == priority]
+    if page_types:
+        rows = [row for row in rows if row.get("page_type") in page_types]
+    if indexabilities:
+        rows = [row for row in rows if str(row.get("indexability") or "Unknown") in indexabilities]
+    if status_codes:
+        rows = [row for row in rows if str(row.get("page_status_code") if row.get("page_status_code") is not None else "Unknown") in status_codes]
+    if search:
+        needle = search.casefold()
+        rows = [row for row in rows if needle in " ".join(str(row.get(key) or "") for key in ("label", "detail", "url", "recommendation")).casefold()]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=["category", "priority", "issue_type", "issue", "affected_url", "page_type", "internal_inlinks", "internal_inlinks_source", "unique_sources", "crawl_depth", "indexability", "status_code", "detail", "recommendation", "source_url", "destination_url", "anchor", "destination_status_code", "follow", "rel", "link_position", "link_origin"])
+    writer.writeheader()
+    for row in rows:
+        evidence = row.get("evidence") or {}
+        writer.writerow({"category": row["category"], "priority": row["priority"], "issue_type": row["type"], "issue": row["label"], "affected_url": row.get("url"), "page_type": row.get("page_type"), "internal_inlinks": row.get("internal_inlinks"), "internal_inlinks_source": row.get("internal_inlinks_source"), "unique_sources": row.get("unique_sources"), "crawl_depth": row.get("crawl_depth"), "indexability": row.get("indexability"), "status_code": row.get("page_status_code"), "detail": row["detail"], "recommendation": row["recommendation"], "source_url": evidence.get("source_url"), "destination_url": evidence.get("destination_url"), "anchor": evidence.get("anchor"), "destination_status_code": evidence.get("status_code"), "follow": evidence.get("follow"), "rel": evidence.get("rel"), "link_position": evidence.get("link_position"), "link_origin": evidence.get("link_origin")})
+    filename = f"internal-link-{category or 'all'}-findings.csv"
+    return Response(output.getvalue(), media_type="text/csv; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def project_or_404(db: Session, project_id: str) -> Project:

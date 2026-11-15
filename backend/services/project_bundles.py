@@ -17,6 +17,8 @@ from ..models import (
     GSCQueryPagePerformance,
     ImportBatch,
     ImportRow,
+    InternalLinkObservation,
+    InternalLinkSnapshot,
     IssueSolution,
     IssueSnapshot,
     IssueSnapshotRun,
@@ -58,6 +60,8 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
     batches = db.scalars(select(ImportBatch).where(ImportBatch.project_id == project.id).order_by(ImportBatch.imported_at)).all()
     batch_ids = [batch.id for batch in batches]
     rows = db.scalars(select(ImportRow).where(ImportRow.batch_id.in_(batch_ids)).order_by(ImportRow.batch_id, ImportRow.row_number)).all() if batch_ids else []
+    internal_link_snapshots = db.scalars(select(InternalLinkSnapshot).where(InternalLinkSnapshot.project_id == project.id).order_by(InternalLinkSnapshot.observed_at)).all()
+    internal_link_observations = db.scalars(select(InternalLinkObservation).where(InternalLinkObservation.project_id == project.id).order_by(InternalLinkObservation.created_at)).all()
     crawl_changes = db.scalars(select(PageCrawlChange).where(PageCrawlChange.project_id == project.id).order_by(PageCrawlChange.observed_at)).all()
     relationships = db.scalars(select(PageRelationship).where(PageRelationship.project_id == project.id).order_by(PageRelationship.created_at)).all()
     sitemap_documents = db.scalars(select(SitemapDocument).where(SitemapDocument.project_id == project.id).order_by(SitemapDocument.imported_at)).all()
@@ -159,6 +163,14 @@ def export_project_bundle(db: Session, project: Project) -> dict[str, Any]:
                 "page_source_id": row.page_id,
             }
             for row in rows
+        ],
+        "internal_link_snapshots": [
+            {"source_id": item.id, "batch_source_id": item.import_batch_id, "complete_snapshot": item.complete_snapshot, "internal_count": item.internal_count, "external_count": item.external_count, "unmatched_count": item.unmatched_count, "observed_at": _iso(item.observed_at)}
+            for item in internal_link_snapshots
+        ],
+        "internal_link_observations": [
+            {"source_id": item.id, "snapshot_source_id": item.snapshot_id, "batch_source_id": item.import_batch_id, "row_number": item.row_number, "source_page_source_id": item.source_page_id, "destination_page_source_id": item.destination_page_id, "source_url": item.source_url, "normalized_source_url": item.normalized_source_url, "destination_url": item.destination_url, "normalized_destination_url": item.normalized_destination_url, "is_internal": item.is_internal, "link_type": item.link_type, "size_bytes": item.size_bytes, "alt_text": item.alt_text, "anchor": item.anchor, "status_code": item.status_code, "status_text": item.status_text, "follow": item.follow, "target": item.target, "rel": item.rel, "path_type": item.path_type, "link_path": item.link_path, "link_position": item.link_position, "link_origin": item.link_origin, "created_at": _iso(item.created_at)}
+            for item in internal_link_observations
         ],
         "page_crawl_changes": [
             {
@@ -280,7 +292,7 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
     source_project = bundle.get("project")
     if not isinstance(source_project, dict) or not source_project.get("name") or not source_project.get("site_url"):
         raise HTTPException(422, "Project bundle is missing required project details")
-    collection_names = ("pages", "import_batches", "import_rows", "page_crawl_changes", "page_relationships", "sitemap_documents", "sitemap_entries", "page_metadata_observations", "page_metadata_recommendations", "page_metadata_changes", "on_page_audit_cases", "issue_solutions", "keywords", "keyword_metrics_snapshots", "ranking_observations", "gsc_query_page_performance", "ga4_page_performance", "topic_clusters", "keyword_groups", "keyword_group_memberships", "grouping_suggestions", "target_mappings", "cannibalization_cases", "cannibalization_evidence", "case_decisions", "review_history", "activity_categories", "issue_snapshots", "issue_snapshot_runs", "roadmap_periods", "seo_tasks", "seo_task_history", "seo_activities")
+    collection_names = ("pages", "import_batches", "import_rows", "internal_link_snapshots", "internal_link_observations", "page_crawl_changes", "page_relationships", "sitemap_documents", "sitemap_entries", "page_metadata_observations", "page_metadata_recommendations", "page_metadata_changes", "on_page_audit_cases", "issue_solutions", "keywords", "keyword_metrics_snapshots", "ranking_observations", "gsc_query_page_performance", "ga4_page_performance", "topic_clusters", "keyword_groups", "keyword_group_memberships", "grouping_suggestions", "target_mappings", "cannibalization_cases", "cannibalization_evidence", "case_decisions", "review_history", "activity_categories", "issue_snapshots", "issue_snapshot_runs", "roadmap_periods", "seo_tasks", "seo_task_history", "seo_activities")
     if any(not isinstance(bundle.get(name, []), list) for name in collection_names):
         raise HTTPException(422, "Project bundle contains invalid record collections")
     try:
@@ -359,6 +371,20 @@ def import_project_bundle(db: Session, bundle: dict[str, Any]) -> Project:
                 error_message=item.get("error_message"),
                 page_id=page_id,
             ))
+        internal_snapshot_ids: dict[str, str] = {}
+        for item in bundle.get("internal_link_snapshots", []):
+            batch_id = batch_ids.get(str(item.get("batch_source_id")))
+            if not batch_id:
+                raise HTTPException(422, "Project bundle contains an internal-link snapshot without its import batch")
+            snapshot = InternalLinkSnapshot(project_id=project.id, import_batch_id=batch_id, complete_snapshot=bool(item.get("complete_snapshot")), internal_count=int(item.get("internal_count") or 0), external_count=int(item.get("external_count") or 0), unmatched_count=int(item.get("unmatched_count") or 0), observed_at=_datetime(item.get("observed_at")) or datetime.now().astimezone())
+            db.add(snapshot); db.flush()
+            if item.get("source_id"): internal_snapshot_ids[str(item["source_id"])] = snapshot.id
+        for item in bundle.get("internal_link_observations", []):
+            snapshot_id = internal_snapshot_ids.get(str(item.get("snapshot_source_id")))
+            batch_id = batch_ids.get(str(item.get("batch_source_id")))
+            if not snapshot_id or not batch_id:
+                raise HTTPException(422, "Project bundle contains internal-link evidence without its snapshot or batch")
+            db.add(InternalLinkObservation(project_id=project.id, snapshot_id=snapshot_id, import_batch_id=batch_id, row_number=int(item.get("row_number") or 0), source_page_id=page_ids.get(str(item.get("source_page_source_id"))) if item.get("source_page_source_id") else None, destination_page_id=page_ids.get(str(item.get("destination_page_source_id"))) if item.get("destination_page_source_id") else None, source_url=str(item.get("source_url") or ""), normalized_source_url=item.get("normalized_source_url"), destination_url=str(item.get("destination_url") or ""), normalized_destination_url=item.get("normalized_destination_url"), is_internal=bool(item.get("is_internal")), link_type=item.get("link_type"), size_bytes=item.get("size_bytes"), alt_text=item.get("alt_text"), anchor=item.get("anchor"), status_code=item.get("status_code"), status_text=item.get("status_text"), follow=item.get("follow"), target=item.get("target"), rel=item.get("rel"), path_type=item.get("path_type"), link_path=item.get("link_path"), link_position=item.get("link_position"), link_origin=item.get("link_origin"), created_at=_datetime(item.get("created_at")) or datetime.now().astimezone()))
         for item in bundle.get("page_crawl_changes", []):
             page_id = page_ids.get(str(item.get("page_source_id")))
             if not page_id:
@@ -603,6 +629,8 @@ def delete_project_records(db: Session, project: Project) -> dict[str, int]:
     page_count = db.query(Page).filter(Page.project_id == project.id).count()
     batch_ids = list(db.scalars(select(ImportBatch.id).where(ImportBatch.project_id == project.id)))
     if batch_ids:
+        db.execute(delete(InternalLinkObservation).where(InternalLinkObservation.import_batch_id.in_(batch_ids)))
+        db.execute(delete(InternalLinkSnapshot).where(InternalLinkSnapshot.import_batch_id.in_(batch_ids)))
         db.execute(delete(ImportRow).where(ImportRow.batch_id.in_(batch_ids)))
     db.execute(delete(SitemapEntry).where(SitemapEntry.project_id == project.id))
     db.execute(delete(SitemapDocument).where(SitemapDocument.project_id == project.id))

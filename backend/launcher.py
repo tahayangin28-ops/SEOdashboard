@@ -24,6 +24,10 @@ HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
 
+def _truthy_environment(name: str) -> bool:
+    return os.getenv(name, "").strip().casefold() in {"1", "true", "yes", "on"}
+
+
 def _read_runtime() -> dict:
     try:
         return json.loads(RUNTIME_FILE.read_text(encoding="utf-8"))
@@ -104,13 +108,21 @@ def start(*, open_browser: bool = True) -> int:
     from uvicorn import Config, Server
 
     from .main import app
-    from .runtime_control import configure_shutdown
+    from .runtime_control import clear_shutdown_configuration, configure_shutdown
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(filename=LOG_DIR / "dashboard.log", level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     port, token = _available_port(), secrets.token_urlsafe(32)
-    server = Server(Config(app, host=HOST, port=port, loop="asyncio", http="h11", log_config=None, access_log=False))
-    configure_shutdown(lambda: setattr(server, "should_exit", True), token)
+    automatic_shutdown = open_browser or _truthy_environment("SEO_AUTO_SHUTDOWN")
+    try:
+        grace_seconds = float(os.getenv("SEO_AUTO_SHUTDOWN_GRACE", "15"))
+    except ValueError:
+        grace_seconds = 15.0
+    server = Server(Config(
+        app, host=HOST, port=port, loop="asyncio", http="h11", log_config=None, access_log=False,
+        ws_ping_interval=10, ws_ping_timeout=20, timeout_graceful_shutdown=30,
+    ))
+    configure_shutdown(lambda: setattr(server, "should_exit", True), token, automatic=automatic_shutdown, grace_seconds=grace_seconds)
     _write_runtime(port, token)
     url = f"http://{HOST}:{port}"
     threading.Thread(target=_open_when_ready, args=(url, open_browser), daemon=True).start()
@@ -118,6 +130,7 @@ def start(*, open_browser: bool = True) -> int:
         server.run()
         return 0
     finally:
+        clear_shutdown_configuration()
         runtime = _read_runtime()
         if runtime.get("pid") == os.getpid():
             RUNTIME_FILE.unlink(missing_ok=True)

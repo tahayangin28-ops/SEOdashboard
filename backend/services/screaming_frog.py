@@ -49,15 +49,34 @@ SCREAMING_FROG_FIELDS: dict[str, dict[str, object]] = {
     "page_type": {"label": "Workspace page type", "aliases": ["Page Type", "Type"]},
 }
 
+SCREAMING_FROG_INLINK_FIELDS: dict[str, dict[str, object]] = {
+    "link_type": {"label": "Link type", "aliases": ["Type"]},
+    "source_url": {"label": "Source URL", "aliases": ["Source", "From"]},
+    "destination_url": {"label": "Destination URL", "aliases": ["Destination", "To"]},
+    "size_bytes": {"label": "Size in bytes", "aliases": ["Size (Bytes)", "Size Bytes"]},
+    "alt_text": {"label": "Alt text", "aliases": ["Alt Text"]},
+    "anchor": {"label": "Anchor text", "aliases": ["Anchor", "Anchor Text"]},
+    "status_code": {"label": "Destination status code", "aliases": ["Status Code", "HTTP Status Code"]},
+    "status_text": {"label": "Destination status", "aliases": ["Status", "Status Text"]},
+    "follow": {"label": "Follow state", "aliases": ["Follow"]},
+    "target": {"label": "Link target", "aliases": ["Target"]},
+    "rel": {"label": "Rel attributes", "aliases": ["Rel"]},
+    "path_type": {"label": "Path type", "aliases": ["Path Type"]},
+    "link_path": {"label": "Link path", "aliases": ["Link Path"]},
+    "link_position": {"label": "Link position", "aliases": ["Link Position"]},
+    "link_origin": {"label": "Link origin", "aliases": ["Link Origin"]},
+}
+
 
 def _loose(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def recognize_headers(columns: list[str]) -> list[dict[str, str | None]]:
+def recognize_headers(columns: list[str], fields: dict[str, dict[str, object]] | None = None) -> list[dict[str, str | None]]:
+    fields = fields or SCREAMING_FROG_FIELDS
     alias_rows = [
         (semantic_key, field["label"], alias)
-        for semantic_key, field in SCREAMING_FROG_FIELDS.items()
+        for semantic_key, field in fields.items()
         for alias in field["aliases"]
     ]
     recognized: list[dict[str, str | None]] = []
@@ -97,8 +116,8 @@ def suggested_semantic_mapping(recognition: list[dict[str, str | None]]) -> dict
     return mapping
 
 
-def semantic_field_options(recognition: list[dict[str, str | None]] | None = None) -> list[dict[str, str]]:
-    options = {key: str(value["label"]) for key, value in SCREAMING_FROG_FIELDS.items()}
+def semantic_field_options(recognition: list[dict[str, str | None]] | None = None, fields: dict[str, dict[str, object]] | None = None) -> list[dict[str, str]]:
+    options = {key: str(value["label"]) for key, value in (fields or SCREAMING_FROG_FIELDS).items()}
     for item in recognition or []:
         key = item.get("semantic_key")
         if key and key not in options:

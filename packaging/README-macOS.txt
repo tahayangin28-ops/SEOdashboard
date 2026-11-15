@@ -8,7 +8,9 @@ your default browser.
 
 Stop
 ----
-Double-click "Stop SEO Dashboard.app" when you finish.
+Close every dashboard tab or window when you finish. The local server stops
+automatically after a short grace period. "Stop SEO Dashboard.app" remains
+available as a fallback while automatic shutdown is being validated.
 
 Updates and data
 ----------------

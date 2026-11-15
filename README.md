@@ -10,7 +10,9 @@ Download the package for your computer from the repository's **Releases** page a
 
 1. Extract `SEO-Data-Workspace-Windows-x64.zip`.
 2. Double-click **SEO Dashboard.exe**. The dashboard opens in the default browser.
-3. Double-click **Stop SEO Dashboard.exe** when finished.
+3. Close every dashboard tab or window when finished. The local server stops automatically after a short grace period.
+
+**Stop SEO Dashboard.exe** remains available as a fallback while automatic shutdown is being validated across supported browsers.
 
 ### macOS
 
@@ -18,9 +20,13 @@ Choose the Apple Silicon package for M-series Macs or the Intel package for olde
 
 1. Extract the downloaded ZIP.
 2. Double-click **SEO Dashboard.app**. The dashboard opens in the default browser.
-3. Double-click **Stop SEO Dashboard.app** when finished.
+3. Close every dashboard tab or window when finished. The local server stops automatically after a short grace period.
+
+**Stop SEO Dashboard.app** remains available as a fallback while automatic shutdown is being validated across supported browsers.
 
 The packaged server listens only on `127.0.0.1:8765`, is not exposed to the local network, and serves both the dashboard and API from the downloaded application. The stable local address also preserves browser-saved table layouts and display preferences across application updates. All core workflows operate on local files and SQLite; no cloud service is required.
+
+Each open dashboard tab maintains a local session connection. Refreshes and brief interruptions are protected by a grace period, and the server stops only after the last dashboard tab disconnects. Developer mode and explicit `--no-browser` runs do not shut down automatically.
 
 ### Data and updates
 
@@ -161,6 +167,14 @@ Every issue can also receive append-only solution log entries. The Site Architec
 Generated sitemap XML uses absolute same-domain URLs, escapes XML values, and splits at 50,000 URLs or 50 MB uncompressed per file. Multiple output files are downloaded with a standards-compliant sitemap index inside a ZIP. Files are only exported locally; the app never publishes them. Optional imported `changefreq` and `priority` values are retained as legacy source evidence but are not invented or added to proposed exports.
 
 Phase 2 API routes are scoped under `/api/projects/{project_id}/architecture`: `summary`, `inventory`, `sitemaps`, `relationships`, `tree`, `tree/export`, `issues`, `issues.csv`, and `adjacency.csv`. Migration `0003_sitemap_site_architecture.py` adds nullable Page planning fields, relationship review metadata, and sitemap document/entry tables without replacing Page IDs. Migration `0004_asset_page_type_backfill.py` adds no new table: it conservatively reclassifies only obvious CSS, JavaScript, image, audio, video, font, and WebAssembly resources from `Unknown` to the `Asset` page type.
+
+### Internal Linking Analysis
+
+The **Internal Linking Analysis** tab uses uploaded Screaming Frog **Inlinks** exports as its only observed-link evidence. Choose **Screaming Frog — Inlinks** in Imports, verify the Source and Destination mappings, review the remaining recognised columns, and confirm the import. The app retains repeated link rows, anchor/alt text, status, follow/rel, position/origin and raw source data. External destinations remain auditable but are excluded from internal-link counts and findings. Re-importing the exact same file does not duplicate observations.
+
+Findings cover broken or redirected destinations, potential orphans and weak pages, crawl-depth and approved-parent gaps, empty/generic/inconsistent anchors, non-indexable targets, reviewable linking opportunities, and structural-position concentration. “Potential orphan” remains deliberately qualified, especially for partial exports. Keyword mappings and approved hierarchy relationships may support an opportunity, but never become proof that a link exists. Findings join the central Issues, priority, solution, SEO Tracker and Task Manager workflows, and can be exported together or by category. Pages expose latest inlink occurrence and unique-source counts.
+
+Each Inlinks confirmation asks whether the file is a complete snapshot. Only two consecutive snapshots explicitly confirmed as complete can support absence-based resolved entries in SEO Tracker; partial exports never close an earlier finding. Migration `0015_internal_linking_analysis.py` stores immutable snapshots and observations locally. Project bundles and database backups preserve the evidence.
 
 The Pages workspace keeps Screaming Frog response evidence in separate fields and displays it in source order: `Content Type`, numeric `Status Code`, response-text `Status`, `Indexability`, and explanatory `Indexability Status`. For readability, the UI derives a supplementary content label such as `(HTML)` from the MIME value while preserving the original imported content type. It also displays the `Asset` classification and a separate `Imported Sitemap` column, so uploaded-XML membership remains evidence rather than being confused with the user's proposed-sitemap decision. Page-type and classification-status filters use multi-select checkboxes and carry into metric exports, URL-only downloads, and clipboard copying; selected rows limit the URL actions when a selection exists. Table columns can be shown, hidden, and resized from the header, with a browser-local layout retained per project. The redundant `Product Pages` classification has been retired; migration `0009_remove_product_pages_type.py` safely maps existing records and compatible legacy imports to `PDP` without deleting URLs. The dashboard reports the distinct number of pages found in imported sitemaps.
 

@@ -144,7 +144,7 @@ def update_activity_status(project_id: str, activity_id: str, payload: StatusCre
         related = {item.id: item for item in db.scalars(select(SEOActivity).where(SEOActivity.project_id == project_id))}
         return serialize_activity(original, category.name if category else None, related)
     related = {item.id: item for item in db.scalars(select(SEOActivity).where(SEOActivity.project_id == project_id))}
-    item = add_activity(db, project_id, source="manual", section=original.section, action_type="status_changed", status=payload.status, title=activity_display_title(original, related), notes=payload.notes.strip() if payload.notes else None, occurred_at=datetime.now(timezone.utc), category_id=original.category_id, page_id=original.page_id, url=original.url, issue_key=original.issue_key, issue_type=original.issue_type, related_activity_id=original.id, before_data={"status": original.status}, after_data={"status": payload.status})
+    item = add_activity(db, project_id, source="manual", section="task_manager" if original.task_id or original.section == "task_manager" else original.section, action_type="status_changed", status=payload.status, title=activity_display_title(original, related), notes=payload.notes.strip() if payload.notes else None, occurred_at=datetime.now(timezone.utc), category_id=original.category_id, page_id=original.page_id, task_id=original.task_id, url=original.url, issue_key=original.issue_key, issue_type=original.issue_type, related_activity_id=original.id, before_data={"status": original.status}, after_data={"status": payload.status})
     db.commit(); db.refresh(item)
     category = db.get(ActivityCategory, item.category_id) if item.category_id else None
     related[item.id] = item

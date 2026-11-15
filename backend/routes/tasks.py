@@ -100,22 +100,32 @@ def task_or_404(db: Session, project_id: str, task_id: str) -> SEOTask:
     return task
 
 
-def validate_task(values: dict[str, Any], db: Session, project_id: str) -> None:
+def validate_task(values: dict[str, Any], db: Session, project_id: str, current: SEOTask | None = None) -> None:
     if values.get("priority") and values["priority"] not in PRIORITIES:
         raise HTTPException(422, "Priority must be critical, high, medium, or low")
     if values.get("status") and values["status"] not in STATUSES:
         raise HTTPException(422, "Status must be To Do, In Progress, On Hold, or Completed")
-    month = values.get("scheduled_month")
+    month = values.get("scheduled_month", current.scheduled_month if current else None)
     if month is not None and not 1 <= month <= 12:
         raise HTTPException(422, "Scheduled month must be between 1 and 12")
-    week = values.get("scheduled_week")
+    week = values.get("scheduled_week", current.scheduled_week if current else None)
     if week and week.weekday() != 0:
         raise HTTPException(422, "Scheduled weeks must start on Monday")
-    period_id = values.get("roadmap_period_id")
+    year = values.get("scheduled_year", current.scheduled_year if current else None)
+    period_id = values.get("roadmap_period_id", current.roadmap_period_id if current else None)
     if period_id:
         period = db.get(RoadmapPeriod, period_id)
         if not period or period.project_id != project_id:
             raise HTTPException(422, "Roadmap period does not belong to this project")
+        if year is not None and year != period.year:
+            raise HTTPException(422, "Scheduled year must match the selected quarter")
+        if month is not None and not period.start_month <= month <= period.end_month:
+            raise HTTPException(422, "Scheduled month must belong to the selected quarter")
+    if week:
+        if year is not None and week.year != year:
+            raise HTTPException(422, "Scheduled week must belong to the selected year")
+        if month is not None and week.month != month:
+            raise HTTPException(422, "Scheduled week must belong to the selected month")
 
 
 def serialize_task(task: SEOTask) -> dict[str, Any]:
@@ -138,9 +148,8 @@ def record_event(db: Session, task: SEOTask, event_type: str, before: dict | Non
     status = "completed" if task.status == "completed" else "changed" if event_type == "updated" else "in_progress"
     if event_type == "verified_resolved":
         status = "resolved"
-    section = task.source_section if task.source_section in {"pages", "site_architecture", "on_page", "keyword", "performance"} else "pages"
     add_activity(db, task.project_id, event_key=f"task:{task.id}:{event_type}:{datetime.now(timezone.utc).isoformat()}", task_id=task.id,
-        source="task_manager", section=section, action_type=f"task_{event_type}", status=status,
+        source="task_manager", section="task_manager", action_type=f"task_{event_type}", status=status,
         title=task.title, notes=notes or task.description, url=task.source_url or (task.related_urls or [None])[0],
         issue_key=task.source_issue_key, issue_type=task.source_issue_type, before_data=before or {}, after_data=after,
         activity_metadata={"task_id": task.id, "task_status": task.status})
@@ -148,8 +157,14 @@ def record_event(db: Session, task: SEOTask, event_type: str, before: dict | Non
 
 def ensure_periods(db: Session, project_id: str, year: int) -> list[RoadmapPeriod]:
     periods = list(db.scalars(select(RoadmapPeriod).where(RoadmapPeriod.project_id == project_id, RoadmapPeriod.year == year).order_by(RoadmapPeriod.position)))
-    if not periods:
-        for position, (name, start, end) in enumerate((("Q1", 1, 3), ("Q2", 4, 6), ("Q3", 7, 9), ("Q4", 10, 12)), 1):
+    expected = (("Q1", 1, 3), ("Q2", 4, 6), ("Q3", 7, 9), ("Q4", 10, 12))
+    existing_ranges = {(period.start_month, period.end_month) for period in periods}
+    if any((start, end) not in existing_ranges for _, start, end in expected):
+        position = max((period.position for period in periods), default=0)
+        for name, start, end in expected:
+            if (start, end) in existing_ranges:
+                continue
+            position += 1
             db.add(RoadmapPeriod(project_id=project_id, year=year, name=name, position=position, start_month=start, end_month=end))
         db.flush()
         periods = list(db.scalars(select(RoadmapPeriod).where(RoadmapPeriod.project_id == project_id, RoadmapPeriod.year == year).order_by(RoadmapPeriod.position)))
@@ -218,62 +233,93 @@ def roadmap_rows(tasks: list[SEOTask], periods: list[RoadmapPeriod]) -> list[dic
 
 def fit_text(value: str, width: float, font: str = "Helvetica", size: float = 7) -> str:
     if stringWidth(value, font, size) <= width: return value
-    while value and stringWidth(f"{value}…", font, size) > width: value = value[:-1]
-    return f"{value}…"
+    while value and stringWidth(f"{value}...", font, size) > width: value = value[:-1]
+    return f"{value}..."
 
 
-def roadmap_pdf(project: Project, year: int, periods: list[RoadmapPeriod], tasks: list[SEOTask]) -> bytes:
+def roadmap_pdf_sections(periods: list[RoadmapPeriod], tasks: list[SEOTask], year: int, include_empty: bool = False, rows_per_page: int = 27) -> list[tuple[RoadmapPeriod, list[date], list[SEOTask], int, int]]:
+    """Build quarter/period pages without mixing timelines or rendering empty task rows."""
+    sections: list[tuple[RoadmapPeriod, list[date], list[SEOTask], int, int]] = []
+    for period in periods:
+        weeks = period_weeks([period], year)
+        period_tasks = []
+        for task in tasks:
+            if task.roadmap_period_id and task.roadmap_period_id != period.id:
+                continue
+            if task_span(task, weeks) is not None:
+                period_tasks.append(task)
+        if not period_tasks and not include_empty:
+            continue
+        chunks = [period_tasks[index:index + rows_per_page] for index in range(0, len(period_tasks), rows_per_page)] or [[]]
+        for part, chunk in enumerate(chunks, 1):
+            sections.append((period, weeks, chunk, part, len(chunks)))
+    return sections
+
+
+def roadmap_pdf(project: Project, year: int, periods: list[RoadmapPeriod], tasks: list[SEOTask], include_empty: bool = False) -> bytes:
     output = io.BytesIO(); page_size = landscape(A3); width, height = page_size
     pdf = canvas.Canvas(output, pagesize=page_size, pageCompression=1)
-    weeks = period_weeks(periods, year)
-    week_chunks = [weeks[index:index + 14] for index in range(0, len(weeks), 14)] or [[]]
-    task_chunks = [tasks[index:index + 28] for index in range(0, len(tasks), 28)] or [[]]
+    sections = roadmap_pdf_sections(periods, tasks, year, include_empty)
     colors = {"to_do": HexColor("#718079"), "in_progress": HexColor("#39725e"), "on_hold": HexColor("#b47b34"), "completed": HexColor("#4f8a68")}
     priority_colors = {"critical": HexColor("#bd4a42"), "high": HexColor("#d17b35"), "medium": HexColor("#b49a35"), "low": HexColor("#6c9183")}
-    period_names = {period.id: period.name for period in periods}
-    page_number = 0
-    for task_page, task_chunk in enumerate(task_chunks, 1):
-        for week_page, week_chunk in enumerate(week_chunks, 1):
-            page_number += 1; left = 30; label_width = 250; grid_left = left + label_width; top = height - 34; row_height = 21
-            week_width = (width - grid_left - 30) / max(1, len(week_chunk))
-            pdf.setFillColor(HexColor("#24483c")); pdf.setFont("Helvetica-Bold", 16); pdf.drawString(left, top, f"{project.name} — SEO Roadmap {year}")
-            pdf.setFillColor(HexColor("#66756f")); pdf.setFont("Helvetica", 7); pdf.drawRightString(width - 30, top, f"Timeline {week_page}/{len(week_chunks)} · Tasks {task_page}/{len(task_chunks)} · Page {page_number}")
-            header_top = top - 22; pdf.setFillColor(HexColor("#e8f0ec")); pdf.rect(left, header_top - 49, width - 60, 50, fill=1, stroke=0)
-            pdf.setFillColor(HexColor("#284d40")); pdf.setFont("Helvetica-Bold", 8); pdf.drawString(left + 6, header_top - 29, "TASK / OWNER")
-            period_labels = [" / ".join(period.name for period in periods if period.start_month <= week.month <= period.end_month) for week in week_chunk]
-            month_labels = [calendar.month_abbr[week.month] for week in week_chunk]
-            for labels, y_position, font, font_size in ((period_labels, header_top - 10, "Helvetica-Bold", 6.5), (month_labels, header_top - 23, "Helvetica", 6.5)):
-                group_start = 0
-                for group_end in range(1, len(labels) + 1):
-                    if group_end == len(labels) or labels[group_end] != labels[group_start]:
-                        group_width = (group_end - group_start) * week_width
-                        center = grid_left + group_start * week_width + group_width / 2
-                        pdf.setFont(font, font_size); pdf.drawCentredString(center, y_position, fit_text(labels[group_start], group_width - 4, font, font_size))
-                        pdf.setStrokeColor(HexColor("#b9ccc3")); pdf.line(grid_left + group_end * week_width, header_top, grid_left + group_end * week_width, header_top - 27)
-                        group_start = group_end
-            for index, week in enumerate(week_chunk):
-                x = grid_left + index * week_width
-                pdf.setFont("Helvetica-Bold", 7); pdf.drawCentredString(x + week_width / 2, header_top - 39, f"{week.day}-{calendar.month_abbr[week.month]}")
-                pdf.setStrokeColor(HexColor("#d3ddd8")); pdf.line(x, header_top - 49, x, 42)
-            y = header_top - 66
-            chunk_indexes = {week: index for index, week in enumerate(week_chunk)}
-            for task in task_chunk:
-                pdf.setFillColor(HexColor("#ffffff") if int((header_top - y) / row_height) % 2 else HexColor("#f7f9f8")); pdf.rect(left, y - 5, width - 60, row_height, fill=1, stroke=0)
-                pdf.setFillColor(priority_colors.get(task.priority, HexColor("#718079"))); pdf.circle(left + 5, y + 5, 2.5, fill=1, stroke=0)
-                pdf.setFillColor(HexColor("#273f37")); pdf.setFont("Helvetica-Bold", 7); pdf.drawString(left + 12, y + 7, fit_text(task.title, label_width - 20, "Helvetica-Bold", 7))
-                owner = task.assigned_to or "Unassigned"; period = period_names.get(task.roadmap_period_id, "Unscheduled")
-                pdf.setFillColor(HexColor("#718079")); pdf.setFont("Helvetica", 6); pdf.drawString(left + 12, y - 1, fit_text(f"{owner} · {period} · {task.status.replace('_', ' ').title()}", label_width - 20, "Helvetica", 6))
-                full_span = task_span(task, weeks)
-                if full_span and week_chunk:
-                    visible = [chunk_indexes[week] for week in week_chunk if full_span[0] <= weeks.index(week) <= full_span[1]]
-                    if visible:
-                        start, end = min(visible), max(visible); bar_x = grid_left + start * week_width + 2; bar_width = (end - start + 1) * week_width - 4
-                        pdf.setFillColor(colors.get(task.status, colors["to_do"])); pdf.roundRect(bar_x, y, bar_width, 10, 3, fill=1, stroke=0)
-                        if bar_width > 34: pdf.setFillColor(white); pdf.setFont("Helvetica-Bold", 5.5); pdf.drawString(bar_x + 4, y + 3, fit_text(task.status.replace("_", " ").title(), bar_width - 8, "Helvetica-Bold", 5.5))
-                y -= row_height
-            pdf.setStrokeColor(HexColor("#cbd7d1")); pdf.rect(left, header_top - 49, width - 60, 50 + row_height * len(task_chunk), fill=0, stroke=1)
-            pdf.setFillColor(HexColor("#718079")); pdf.setFont("Helvetica", 6); pdf.drawString(left, 24, "Generated locally by SEO Data Workspace · Landscape timeline · Completion does not imply crawl verification")
-            pdf.showPage()
+    if not sections:
+        pdf.setFillColor(HexColor("#24483c")); pdf.setFont("Helvetica-Bold", 18); pdf.drawString(42, height - 54, f"{project.name} - SEO Roadmap {year}")
+        pdf.setFillColor(HexColor("#65756f")); pdf.setFont("Helvetica", 10); pdf.drawString(42, height - 84, "No scheduled tasks match the selected periods and filters.")
+        pdf.showPage()
+    for page_number, (period, weeks, page_tasks, part, part_count) in enumerate(sections, 1):
+        left, right, label_width = 32, 32, 252
+        grid_left = left + label_width; grid_width = width - grid_left - right
+        top = height - 34; header_top = top - 25; header_height = 59; row_height = 21
+        week_width = grid_width / max(1, len(weeks)); week_font = max(4.5, min(7.0, week_width / 7))
+        pdf.setFillColor(HexColor("#24483c")); pdf.setFont("Helvetica-Bold", 16); pdf.drawString(left, top, f"{project.name} - SEO Roadmap {year}")
+        period_detail = f"{period.name} | {calendar.month_name[period.start_month]} - {calendar.month_name[period.end_month]}"
+        if part_count > 1: period_detail += f" | Task page {part}/{part_count}"
+        pdf.setFillColor(HexColor("#65756f")); pdf.setFont("Helvetica", 7); pdf.drawRightString(width - right, top, f"{period_detail} | PDF page {page_number}/{len(sections)}")
+
+        header_bottom = header_top - header_height
+        pdf.setFillColor(HexColor("#e8f0ec")); pdf.rect(left, header_bottom, width - left - right, header_height, fill=1, stroke=0)
+        pdf.setFillColor(HexColor("#284d40")); pdf.setFont("Helvetica-Bold", 8); pdf.drawString(left + 8, header_bottom + 22, "TASK / OWNER")
+        pdf.setFont("Helvetica-Bold", 8); pdf.drawCentredString(grid_left + grid_width / 2, header_top - 10, fit_text(period.name, grid_width - 8, "Helvetica-Bold", 8))
+
+        month_start = 0
+        month_labels = [week.month for week in weeks]
+        for month_end in range(1, len(weeks) + 1):
+            if month_end == len(weeks) or month_labels[month_end] != month_labels[month_start]:
+                group_width = (month_end - month_start) * week_width
+                center = grid_left + month_start * week_width + group_width / 2
+                pdf.setFont("Helvetica-Bold", 6.5); pdf.drawCentredString(center, header_top - 25, fit_text(calendar.month_name[month_labels[month_start]], group_width - 4, "Helvetica-Bold", 6.5))
+                pdf.setStrokeColor(HexColor("#aebfb7")); pdf.line(grid_left + month_end * week_width, header_top - 15, grid_left + month_end * week_width, header_bottom)
+                month_start = month_end
+        for index, week in enumerate(weeks):
+            x = grid_left + index * week_width
+            pdf.setFillColor(HexColor("#284d40")); pdf.setFont("Helvetica-Bold", week_font); pdf.drawCentredString(x + week_width / 2, header_bottom + 7, f"{week.day}-{calendar.month_abbr[week.month]}")
+
+        row_top = header_bottom
+        for row, task in enumerate(page_tasks):
+            row_bottom = row_top - (row + 1) * row_height
+            pdf.setFillColor(HexColor("#ffffff") if row % 2 else HexColor("#f7f9f8")); pdf.rect(left, row_bottom, width - left - right, row_height, fill=1, stroke=0)
+            pdf.setFillColor(priority_colors.get(task.priority, HexColor("#718079"))); pdf.circle(left + 7, row_bottom + row_height / 2, 2.5, fill=1, stroke=0)
+            pdf.setFillColor(HexColor("#273f37")); pdf.setFont("Helvetica-Bold", 7); pdf.drawString(left + 15, row_bottom + 11, fit_text(task.title, label_width - 24, "Helvetica-Bold", 7))
+            owner = task.assigned_to or "Unassigned"
+            pdf.setFillColor(HexColor("#718079")); pdf.setFont("Helvetica", 5.7); pdf.drawString(left + 15, row_bottom + 3, fit_text(f"{owner} | {task.status.replace('_', ' ').title()} | {task.priority.title()}", label_width - 24, "Helvetica", 5.7))
+            span = task_span(task, weeks)
+            if span:
+                start, end = span; bar_x = grid_left + start * week_width + 2; bar_width = max(3, (end - start + 1) * week_width - 4)
+                pdf.setFillColor(colors.get(task.status, colors["to_do"])); pdf.roundRect(bar_x, row_bottom + 5, bar_width, 11, 3, fill=1, stroke=0)
+                if bar_width > 42:
+                    pdf.setFillColor(white); pdf.setFont("Helvetica-Bold", max(4.5, min(5.7, week_font))); pdf.drawString(bar_x + 4, row_bottom + 8, fit_text(task.title, bar_width - 8, "Helvetica-Bold", max(4.5, min(5.7, week_font))))
+
+        table_bottom = row_top - len(page_tasks) * row_height
+        if not page_tasks:
+            table_bottom = row_top - 34
+            pdf.setFillColor(HexColor("#f8faf9")); pdf.rect(left, table_bottom, width - left - right, 34, fill=1, stroke=0)
+            pdf.setFillColor(HexColor("#65756f")); pdf.setFont("Helvetica", 8); pdf.drawString(left + 12, table_bottom + 13, "No scheduled tasks in this period.")
+        pdf.setStrokeColor(HexColor("#d3ddd8"))
+        for index in range(len(weeks) + 1):
+            x = grid_left + index * week_width; pdf.line(x, header_bottom, x, table_bottom)
+        pdf.setStrokeColor(HexColor("#bfcfc7")); pdf.rect(left, table_bottom, width - left - right, header_top - table_bottom, fill=0, stroke=1)
+        pdf.setFillColor(HexColor("#718079")); pdf.setFont("Helvetica", 6); pdf.drawString(left, 22, "Generated locally by SEO Data Workspace | Completion does not imply crawl verification")
+        pdf.showPage()
     pdf.save(); return output.getvalue()
 
 
@@ -330,7 +376,7 @@ def task_detail(project_id: str, task_id: str, db: Session = Depends(get_db)):
 def update_task(project_id: str, task_id: str, payload: TaskPatch, db: Session = Depends(get_db)):
     task = task_or_404(db, project_id, task_id)
     values = payload.model_dump(exclude_unset=True)
-    validate_task(values, db, project_id)
+    validate_task(values, db, project_id, task)
     before = snapshot(task)
     if values.get("status") == "completed" and task.status != "completed" and "completion_date" not in values:
         values["completion_date"] = date.today()
@@ -376,12 +422,12 @@ def roadmap(project_id: str, year: int = date.today().year, db: Session = Depend
 
 
 @router.get("/roadmap/export")
-def export_roadmap(project_id: str, format: str = "csv", year: int = date.today().year, period_ids: list[str] = Query(default=[]), statuses: list[str] = Query(default=[]), priorities: list[str] = Query(default=[]), db: Session = Depends(get_db)):
+def export_roadmap(project_id: str, format: str = "csv", year: int = date.today().year, period_ids: list[str] = Query(default=[]), statuses: list[str] = Query(default=[]), priorities: list[str] = Query(default=[]), include_empty: bool = False, db: Session = Depends(get_db)):
     project = project_or_404(db, project_id)
     periods, tasks = selected_roadmap(db, project_id, year, period_ids, statuses, priorities)
     db.commit()
     if format.lower() == "pdf":
-        return Response(roadmap_pdf(project, year, periods, tasks), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="seo-roadmap-{year}.pdf"'})
+        return Response(roadmap_pdf(project, year, periods, tasks, include_empty), media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="seo-roadmap-{year}.pdf"'})
     if format.lower() != "csv":
         raise HTTPException(422, "Roadmap export format must be csv or pdf")
     rows = roadmap_rows(tasks, periods); output = io.StringIO()

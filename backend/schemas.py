@@ -59,6 +59,11 @@ class PageOut(ORMModel):
     in_imported_sitemap: bool = False
     effective: dict[str, Any] = Field(default_factory=dict)
     available_metrics: dict[str, Any] = Field(default_factory=dict)
+    inlinks: int | None = None
+    internal_inlinks: int | None = None
+    internal_inlinks_source: str | None = None
+    unique_sources: int | None = None
+    crawl_depth: int | None = None
 
 
 class ManualPageCreate(BaseModel):
@@ -151,6 +156,7 @@ class ConfirmImport(BaseModel):
     mapping: dict[str, str]
     duplicate_strategy: str = "update_observations"
     headers_verified: bool = False
+    complete_snapshot: bool = False
 
 
 class ImportOut(ORMModel):

@@ -311,6 +311,15 @@ def architecture_issues(db: Session, project: Project) -> list[dict]:
         case = priority_cases.get(issue["issue_key"])
         if case and case.priority_override:
             issue["priority"] = case.priority_override
+    # Observed link findings retain their own evidence-based categories and
+    # stable keys, but join the same central Issues and priority workflows.
+    from .internal_links import internal_link_findings
+    link_issues = internal_link_findings(db, project)
+    for issue in link_issues:
+        case = priority_cases.get(issue["issue_key"])
+        if case and case.priority_override:
+            issue["priority"] = case.priority_override
+    issues.extend(link_issues)
     return issues
 
 
